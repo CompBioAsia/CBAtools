@@ -80,7 +80,6 @@ import numpy as np
 
 from rdkit import Chem
 from rdkit.Chem import rdDistGeom
-from openbabel import openbabel as ob
 
 from crossflow.tasks import SubprocessTask
 from crossflow.filehandling import FileHandler, FileHandle
@@ -112,13 +111,12 @@ def smiles_to_traj(smi, pH=7.0):
         charge (int): Formal charge on the molecule.
 
     '''
-    obc = ob.OBConversion()
-    obc.SetInAndOutFormats('smi', 'smi')
+    _check_available('obabel')
+    smi_ph = SubprocessTask('echo {smi} | obabel -ismi -osmi -pH {pH}')
+    smi_ph.set_inputs(['smi', 'pH'])
+    smi_ph.set_outputs(['STDOUT'])
+    smi_pH = smi_ph(smi, pH)
 
-    obmol = ob.OBMol()
-    obc.ReadString(obmol, smi)
-    obmol.CorrectForPH(pH)
-    smi_pH = obc.WriteString(obmol)
     charge = smi_pH.count('+]') - smi_pH.count('-]')
     mol_pH = Chem.MolFromSmiles(smi_pH)
     mol_pH_H = Chem.AddHs(mol_pH)
