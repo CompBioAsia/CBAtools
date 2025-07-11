@@ -1,0 +1,7 @@
+mdtraj
+numpy
+rdkit
+openbabel
+crossflow
+shutil
+requests
