@@ -886,6 +886,7 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
           overwrite=False,
           forcefields=None,
           solvate=None,
+          ion_molarity=None,
           buffer=10.0):
     """
     Parameterize a PDB file for AMBER simulations.
@@ -944,6 +945,24 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
 
     prmtop, inpcrd = leap(inpdb, forcefields, het_names=het_names,
                           solvate=solvate, buffer=buffer, het_dir=het_dir)
+    if ion_molarity:
+        ttmp = mdt.load(inpcrd, top=prmtop)
+        n_waters = len(ttmp.topology.select('name O and resname HOH'))
+        n_na = len(ttmp.topology.select('name "Na+"'))
+        n_cl = len(ttmp.topology.select('name "Cl-"'))
+        n_ions = int(ion_molarity * n_waters/55.56)
+        if n_na > 0:
+            n_cl = n_ions - n_na
+            n_na = n_ions
+        else:
+            n_na = n_ions - n_cl
+            n_cl = n_ions
+        n_na = max(n_na, 0)
+        n_cl = max(n_cl, 0)
+        prmtop, inpcrd = leap(inpdb, forcefields, het_names=het_names,
+                          solvate=solvate, buffer=buffer, het_dir=het_dir,
+                          n_na=n_na, n_cl=n_cl)
+
     prmtop.save(outprmtop)
     print(f'Parameters written to {outprmtop}')
     inpcrd.save(outinpcrd)
@@ -1030,17 +1049,21 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
     frcmod.save(f'{residue_name}.frcmod')
 
 
-def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.'):
+def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
+         n_na=0,
+         n_cl=0):
     '''
     Parameterize a molecular system using tleap.
 
     Args:
-       amberpdb str): An Amber-compliant PDB file
+       amberpdb (str): An Amber-compliant PDB file
        ff (list): The force fields to use.
        het_names (list): List of parameterised heterogens
        solvate (str or None): type of periodic box ('box', 'cube', or 'oct')
        buffer (float): Clearance between solute and any box edge (Angstroms)
        het_dir (str or Path): location of the directory containing heterogen parameters
+       n_na (int): number of Na+ ions to add (0 = minimal salt)
+       n_cl (int): number of Cl- ions to add (0 = minimal salt)
 
     '''
     inputs = ['script', 'system.pdb']
@@ -1067,7 +1090,7 @@ def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.'):
     elif solvate == "box":
         script += f"solvatebox system TIP3PBOX {buffer}\n"
     if solvate is not None:
-        script += "addions system Na+ 0\naddions system Cl- 0\n"
+        script += f"addions system Na+ {n_na}\naddions system Cl- {n_cl}\n"
     script += "saveamberparm system system.prmtop system.inpcrd\nquit"
 
     tleap = SubprocessTask('tleap -f script')

@@ -23,6 +23,8 @@ def param_cli():
                         help='minimum distance of solute atoms from box edge',
                         type=float, default=10.0)
     parser.add_argument('--het_dir', help='Directory for heterogen files')
+    parser.add_argument('--ion_molarity', type=float,
+                        help='Target ionic strength (M)')
 
     parsed_args = parser.parse_args()
     # If param expects positional arguments, pass them directly
