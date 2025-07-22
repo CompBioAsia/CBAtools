@@ -372,7 +372,156 @@ def _caca(traj1, i, traj2, j):
     return np.linalg.norm(dxyz, axis=1)
 
 
-def merge(acceptor, donor, alignment, shoulder_width=3,
+def merge(acceptor, donor, alignment, shoulder_width=3, 
+          min_ca_displacement=0.1, trim=True):
+    '''
+    Merge two MDTraj trajectories based on a sequence alignment.
+
+    Missing parts of the acceptor trajectory are filled in with
+    parts from the donor trajectory.
+
+    This version fits each loop individually, using the overlapping
+    shoulder regions to determine the best fit.
+    '''
+    log = ''
+    matches, mismatches, gaps = aln_score(alignment)
+    if gaps == 0:
+        print('Warning: no gaps detected')
+        return acceptor
+    
+    dd = [] # dd will hold the indices of the donor residues
+    i = 0
+    for a in alignment[0]:
+        if a != '-':
+            dd.append(i)
+            i += 1
+        else:
+            dd.append(-1)
+    
+    di = [] # di will hold the indices of the acceptor residues
+    i = 0
+    for a in alignment[1]:
+        if a != '-':
+            di.append(i)
+            i += 1
+        else:
+            di.append(-1)
+    # Identify the chunks - contiguous sections to be picked from either
+    # acceptor or donor
+
+    chunk_starts = [0]
+    in_loop = di[0] == -1
+    for i, a in enumerate(di):
+        if in_loop and a != -1:
+            chunk_starts.append(i)
+            in_loop = False
+        elif not in_loop and a == -1:
+            chunk_starts.append(i)
+            in_loop = True
+
+    n_chunks = len(chunk_starts)
+    chunk_ends = []
+    for i in range(1, n_chunks):
+        chunk_ends.append(chunk_starts[i] - 1)
+    chunk_ends.append(len(alignment[1])-1)
+
+    chunks = []
+    for i in range(n_chunks):
+        if di[chunk_starts[i]] == -1:
+            cid = {'source': 'donor', 'start': chunk_starts[i], 'end': chunk_ends[i]}
+            log += f'building residues {chunk_starts[i]} to {chunk_ends[i]} from donor\n'
+        else:
+            cid = {'source': 'acceptor', 'start': chunk_starts[i], 'end': chunk_ends[i]}
+            log += f'building residues {chunk_starts[i]} to {chunk_ends[i]} from acceptor\n'
+        chunks.append(cid)
+
+    # Adjust if trimming is requested
+    if trim:
+        if chunks[0]['source'] == 'donor':
+            chunks = chunks[1:]
+        if chunks[-1]['source'] == 'donor':
+            chunks = chunks[:-1]
+
+    # Now identify shoulder residues available for fitting
+    shoulders = []
+    for i, chunk in enumerate(chunks):
+        if chunk['source'] == 'donor':
+            # look leftwards...
+            sstart = chunk['start'] - 1
+            valid = sstart > -1
+            swid = 0
+            while valid:
+                swid += 1
+                valid = di[sstart] > -1 and dd[sstart] > -1
+                sstart -= 1
+                valid = sstart > -1 and chunk['start'] - sstart <= shoulder_width
+            shoulders.append(swid)
+            
+            # look rightwards...
+            sstart = chunk['end'] + 1
+            valid = sstart < len(di)
+            swid = 0
+            while valid:
+                swid += 1
+                valid = di[sstart] > -1 and dd[sstart] > -1
+                sstart += 1
+                valid = sstart < len(di) and sstart - chunk['end'] <= shoulder_width
+            shoulders.append(swid)
+
+    # Now generate the aligned chunks as individual trajectories
+    ic = -1
+    t_chunks = []
+    for chunk in chunks:
+        if chunk['source'] == 'acceptor':
+            i = di[chunk['start']]
+            j = di[chunk['end']]
+            sel = acceptor.topology.select(f'resid {i} to {j}')
+            t_chunks.append(acceptor.atom_slice(sel))
+            
+        elif chunk['source'] == 'donor':
+            ic += 1
+            lr = shoulders[2*ic]
+            rr = shoulders[2*ic + 1]
+            if lr > 0:
+                i_d = dd[chunk['start'] - 1]
+                i_a = di[chunk['start'] - 1]
+                txtd = f'(resid {i_d - lr} to {i_d} and backbone)'
+                txta = f'(resid {i_a - lr} to {i_a} and backbone)'
+            if rr > 0 and lr > 0:
+                txtd += ' or '
+                txta += ' or '
+            if rr > 0:
+                i_d = dd[chunk['end'] + 1]
+                i_a = di[chunk['end'] + 1]
+                txtd = f'(resid {i_d} to {i_d + rr} and backbone)'
+                txta = f'(resid {i_a} to {i_a + rr} and backbone)'
+            
+            seld = donor.topology.select(txtd)
+            sela = acceptor.topology.select(txta)
+            tdd = donor.superpose(acceptor, atom_indices=seld, ref_atom_indices=sela)
+            i = dd[chunk['start']]
+            j = dd[chunk['end']]
+            sel = tdd.topology.select(f'resid {i} to {j}')
+            t_chunks.append(tdd.atom_slice(sel))
+
+    # Now stack the chunks together
+    t_out = mdt.Trajectory(t_chunks[0].xyz, t_chunks[0].topology)
+    for t in t_chunks[1:]:
+        t_out = t_out.stack(t)
+
+    # Fix the topology:
+    newtop = mdt.Topology()
+    cid = newtop.add_chain()
+    for r in t_out.topology.residues:
+        rid = newtop.add_residue(r.name, cid)
+        for a in r.atoms:
+            _ = newtop.add_atom(a.name, a.element, rid)
+    newtop._bonds = t_out.topology._bonds
+    t_out.topology = newtop
+    return t_out, log
+
+
+def merge_old(acceptor, donor, alignment, shoulder_width=3,
           min_ca_displacement=0.1, trim=True):
     '''
     Merge two MDTraj trajectories based on a sequence alignment.
