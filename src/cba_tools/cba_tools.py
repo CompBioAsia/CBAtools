@@ -467,16 +467,21 @@ def complete(t_in):
     '''
 
     _check_available('pdb4amber')
-    pdb4amber = SubprocessTask('pdb4amber -i in.pdb --add-missing-atoms'
-                               ' --reduce > out.pdb')
+    # Step 1: add missing heavy atoms
+    pdb4amber = SubprocessTask(
+        'pdb4amber -i in.pdb --add-missing-atoms --no-conect > out.pdb'
+        )
     pdb4amber.set_inputs(['in.pdb'])
     pdb4amber.set_outputs(['out.pdb'])
     out = pdb4amber(t_in)
-    # CONECT records added by pdb4amber end up bogus...
-    if 'CONECT' in out.read_text():
-        text = '\n'.join([line for line in out.read_text().split('\n')
-                         if 'CONECT' not in line]) + '\n'
-        out.write_text(text)
+    # Step 2; remove all hydrogens, then run through reduce, though its
+    # only the NQH flips and HIX states we care about:
+    reduce = SubprocessTask(
+        'reduce -Trim in.pdb | reduce -BUILD - | reduce -Trim - > out.pdb'
+        )
+    reduce.set_inputs(['in.pdb'])
+    reduce.set_outputs(['out.pdb'])
+    out = reduce(out)
     t_out = mdt.load_pdb(out, standard_names=False)
     return t_out
 
@@ -864,6 +869,7 @@ def alpha_loopfix(inpdb, outpdb,
     t = mdt.load_pdb(inpdb, standard_names=False)
 
     t_alpha, log = alpha_match(t, trim=False)
+
     lines = log.split('\n')
     for i, l in enumerate(lines):
         if 'sequence similarity' in l:
@@ -871,7 +877,8 @@ def alpha_loopfix(inpdb, outpdb,
         elif 'WARNING' in l:
             print(f'{l} {lines[i+1]}')
 
-    t_fixed, log = loopfix(t, t_alpha, trim=trim, shoulder_width=max_shoulder_size,
+    t_fixed, log = loopfix(t, t_alpha, trim=trim,
+                           shoulder_width=max_shoulder_size,
                            min_ca_displacement=min_ca_displacement)
     t_fixed.save(outpdb)
     print(log)
@@ -959,9 +966,10 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
             n_cl = n_ions
         n_na = max(n_na, 0)
         n_cl = max(n_cl, 0)
-        prmtop, inpcrd = leap(inpdb, forcefields, het_names=het_names,
-                          solvate=solvate, buffer=buffer, het_dir=het_dir,
-                          n_na=n_na, n_cl=n_cl)
+        prmtop, inpcrd = leap(
+            inpdb, forcefields, het_names=het_names,
+            solvate=solvate, buffer=buffer, het_dir=het_dir,
+            n_na=n_na, n_cl=n_cl)
 
     prmtop.save(outprmtop)
     print(f'Parameters written to {outprmtop}')
@@ -1061,11 +1069,13 @@ def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
        het_names (list): List of parameterised heterogens
        solvate (str or None): type of periodic box ('box', 'cube', or 'oct')
        buffer (float): Clearance between solute and any box edge (Angstroms)
-       het_dir (str or Path): location of the directory containing heterogen parameters
+       het_dir (str or Path): location of the directory containing heterogen
+                              parameters
        n_na (int): number of Na+ ions to add (0 = minimal salt)
        n_cl (int): number of Cl- ions to add (0 = minimal salt)
 
     '''
+    _check_available('tleap')
     inputs = ['script', 'system.pdb']
     outputs = ['system.prmtop', 'system.inpcrd']
     script = "".join([f'source leaprc.{f}\n' for f in ff])
@@ -1238,6 +1248,24 @@ def _alpha_loopfix(inpdb, outpdb,
     print(f'Fixed structure saved as {outpdb}.')
 
 
+def ambpdb(inpcrd, prmtop):
+    '''
+    Convert an Amber inpcrd file to a PDB file.
+
+    Args:
+        inpcrd (str): input inpcrd file name
+        prmtop (str): input prmtop file name
+    '''
+    _check_available('ambpdb')
+
+    ambpdb = SubprocessTask('ambpdb -p x.prmtop -c x.inpcrd > x.pdb')
+    ambpdb.set_inputs(['x.inpcrd', 'x.prmtop'])
+    ambpdb.set_outputs(['x.pdb'])
+    outpdb = ambpdb(inpcrd, prmtop)
+
+    return outpdb
+
+
 def make_refc(pdb, inpcrd, prmtop, refc):
     '''
     Make a reference coordinate file for an Amber simulation.
@@ -1273,3 +1301,133 @@ def make_refc(pdb, inpcrd, prmtop, refc):
     ti.xyz[0, :n_ref] = tr.xyz[0, :n_ref]
     ti.save(refc)
     print(f'Reference coordinates saved as {refc}.')
+
+
+def rest_min(tin, kr=1.0, maxcyc=200):
+    '''
+    Perform restrained minimization on a trajectory.
+
+    Use openmm or sander to perform the minimization.
+
+    Args:
+        tin (mdt.Trajectory): input trajectory
+        kr (float): force constant for the restraint (default: 1.0)
+        maxcyc (int): maximum number of cycles (default: 200)
+
+    Returns:
+        mdt.Trajectory: minimized trajectory
+    '''
+
+    try:
+        return rest_min_omm(tin, kr=kr, maxcyc=maxcyc)
+    except ImportError:
+        return rest_min_sander(tin, kr=kr, maxcyc=maxcyc)
+
+
+def rest_min_omm(tin, kr=1.0, maxcyc=200):
+    '''
+    Perform restrained minimization on a trajectory using OpenMM.
+
+    Args:
+        tin (mdt.Trajectory): input trajectory
+        kr (float): force constant for the restraint (default: 1.0)
+        maxcyc (int): maximum number of cycles (default: 200)
+
+    Returns:
+        mdt.Trajectory: minimized trajectory
+    '''
+    from openmm.app import AmberInpcrdFile, AmberPrmtopFile, Simulation
+    from openmm import LangevinMiddleIntegrator
+    from openmm.app import CutoffNonPeriodic
+    from openmm.unit import nanometer, kelvin, picosecond
+    from openmm import CustomExternalForce
+    from openmm.unit import kilocalories_per_mole, angstroms
+
+    np = tin.topology.select('not protein')
+    if len(np) > 0:
+        raise ValueError(
+            'Error: input trajectory must contain only protein atoms')
+    prmtop, inpcrd = leap(tin, ['protein.ff14SB'])
+    pdb = ambpdb(inpcrd, prmtop)
+    OPRMTOP = AmberPrmtopFile(prmtop)
+    OINPCRD = AmberInpcrdFile(inpcrd)
+
+    system = OPRMTOP.createSystem(
+        nonbondedMethod=CutoffNonPeriodic,
+        nonbondedCutoff=1*nanometer)
+
+    integrator = LangevinMiddleIntegrator(
+        300*kelvin,
+        1/picosecond,
+        0.004*picosecond)
+
+    force = CustomExternalForce("k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
+    force.addGlobalParameter("k", kr*kilocalories_per_mole/angstroms**2)
+    force.addPerParticleParameter("x0")
+    force.addPerParticleParameter("y0")
+    force.addPerParticleParameter("z0")
+    for i, atom in enumerate(OPRMTOP.topology.atoms()):
+        force.addParticle(i, OINPCRD.positions[i].value_in_unit(nanometer))
+    system.addForce(force)
+
+    simulation = Simulation(OPRMTOP.topology, system, integrator)
+    simulation.context.setPositions(OINPCRD.positions)
+    simulation.minimizeEnergy(maxIterations=maxcyc)
+    positions = simulation.context.getState(
+        getPositions=True).getPositions(asNumpy=True)
+
+    # Create a new trajectory with minimized positions
+    tmptop = mdt.load_topology(pdb)
+    if tmptop._atoms[1].name == 'H':
+        tmptop._atoms[1].name = 'H1'
+    tout = mdt.Trajectory(positions, tmptop)
+    log = f'Restrained minimization performed using OpenMM with force constant {kr} kcal/mol/Å² for {maxcyc} cycles.'
+
+    return tout, log
+
+
+def rest_min_sander(tin, kr=1.0, maxcyc=200):
+    '''
+    Perform restrained minimization on a trajectory using Sander.
+
+    Args:
+        tin (mdt.Trajectory): input trajectory
+        kr (float): force constant for the restraint (default: 1.0)
+        maxcyc (int): maximum number of cycles (default: 200)
+
+    Returns:
+        mdt.Trajectory: minimized trajectory
+    '''
+    np = tin.topology.select('not protein')
+    if len(np) > 0:
+        raise ValueError(
+            'Error: input trajectory must contain only protein atoms')
+    _check_available('sander')
+    prmtop, inpcrd = leap(tin, ['protein.ff14SB'])
+    rmin = SubprocessTask('sander -O -i min.in -o min.out -p prmtop'
+                          ' -c in.rst7 -r out.ncrst -ref in.rst7')
+    rmin.set_inputs(['min.in', 'prmtop', 'in.rst7'])
+    rmin.set_outputs(['min.out', 'out.ncrst'])
+    # Create the input file for sander
+    min_in = f"""Minimization
+ &cntrl
+    imin=1, maxcyc={maxcyc},
+    ntpr=5,
+    ntr=1,
+    igb=6,
+    restraint_wt={kr},
+    restraintmask=':1-{tin.topology.n_residues}',
+ &end
+ """
+    fh = FileHandler()
+    minin = fh.create('min.in')
+    minin.write_text(min_in)
+
+    # Perform the minimization
+    log, restart = rmin(minin, prmtop, inpcrd)
+
+    # Check for errors in the log
+    if 'NSTEP' not in log.read_text():
+        raise RuntimeError(f'Error: minimization failed.\n{log}')
+    tout = mdt.load(restart, top=prmtop)
+    return tout, log.read_text()

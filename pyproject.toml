@@ -39,3 +39,6 @@ dependencies = [
 loopfix = "cba_tools.cli_scripts:loopfix_cli"
 param = "cba_tools.cli_scripts:param_cli"
 make_refc = "cba_tools.cli_scripts:make_refc_cli"
+prepare_protein = "cba_tools.cli_scripts:prepare_protein_cli"
+rest_min = "cba_tools.cli_scripts:rest_min_cli"
+alpha_loopfix = "cba_tools.cli_scripts:alpha_loopfix_cli"

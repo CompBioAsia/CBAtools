@@ -3,6 +3,7 @@
 from argparse import ArgumentParser
 import mdtraj as mdt
 from cba_tools.cba_tools import loopfix, param, make_refc
+from cba_tools.cba_tools import complete, rest_min, alpha_loopfix
 
 
 def param_cli():
@@ -22,7 +23,8 @@ def param_cli():
     parser.add_argument('--buffer',
                         help='minimum distance of solute atoms from box edge',
                         type=float, default=10.0)
-    parser.add_argument('--het_dir', help='Directory for heterogen files')
+    parser.add_argument('--het_dir', help='Directory for heterogen files',
+                        default='.')
     parser.add_argument('--ion_molarity', type=float,
                         help='Target ionic strength (M)')
 
@@ -70,3 +72,59 @@ def make_refc_cli():
     parsed_args = parser.parse_args()
     result = make_refc(**vars(parsed_args))
     return result
+
+
+def prepare_protein_cli():
+
+    parser = ArgumentParser(
+        description="Prepare a PDB file for AMBER simulation."
+    )
+    parser.add_argument('--inpdb', help='Input PDB file', required=True)
+    parser.add_argument('--outpdb', help='Output PDB file',
+                        required=True)
+
+    parsed_args = parser.parse_args()
+    t_out = complete(parsed_args.inpdb)
+    t_out.write(parsed_args.outpdb)
+
+
+def rest_min_cli():
+    parser = ArgumentParser(
+        description="Perform restrained minimization on a protein PDB file."
+    )
+    parser.add_argument('--inpdb', help='Input PDB file', required=True)
+    parser.add_argument('--outpdb', help='Output PDB file',
+                        required=True)
+    parser.add_argument('--maxcyc', type=int, default=200,
+                        help='Maximum number of minimization cycles')
+    parser.add_argument('--kr', type=float, default=1.0,
+                        help='Restraint force constant')
+    parser.add_argument('--logfile', help='Log file for minimization output')
+
+    parsed_args = parser.parse_args()
+    t_in = mdt.load_pdb(parsed_args.inpdb, standard_names=False)
+
+    try:
+        t_out, log = rest_min(t_in, maxcyc=parsed_args.maxcyc,
+                              kr=parsed_args.kr)
+    except Exception as e:
+        print("Error during minimization:", e)
+        return
+    t_out.save_pdb(parsed_args.outpdb)
+    if parsed_args.logfile:
+        with open(parsed_args.logfile, 'w') as log_file:
+            log_file.write(log)
+
+
+def alpha_loopfix_cli():
+    parser = ArgumentParser(
+        description="Fix missing loops in a PDB file using Alphafold.")
+    parser.add_argument("-i", "--input_file",
+                        help="Input PDB file.", required=True)
+    parser.add_argument("-o", "--output_file",
+                        help="Fixed PDB file.", required=True)
+    parser.add_argument("-t", "--trim", action="store_true",
+                        help="Trim the fixed PDB file to match the input.")
+    args = parser.parse_args()
+
+    alpha_loopfix(args.input_file, args.output_file, trim=args.trim)
