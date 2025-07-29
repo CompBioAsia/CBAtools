@@ -81,7 +81,7 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdDistGeom
 
-from crossflow.tasks import SubprocessTask
+from crossflow.tasks import SubprocessTask, CalledProcessError
 from crossflow.filehandling import FileHandler, FileHandle
 from functools import cache
 from enum import IntEnum
@@ -94,6 +94,10 @@ from tempfile import NamedTemporaryFile
 # from retry_requests import retry
 from pathlib import Path
 from time import sleep
+
+from bs4 import BeautifulSoup
+import json
+
 
 #  Part 1: Various utilities
 
@@ -372,7 +376,7 @@ def _caca(traj1, i, traj2, j):
     return np.linalg.norm(dxyz, axis=1)
 
 
-def merge(acceptor, donor, alignment, shoulder_width=3, 
+def merge(acceptor, donor, alignment, shoulder_width=3,
           min_ca_displacement=0.1, trim=True):
     '''
     Merge two MDTraj trajectories based on a sequence alignment.
@@ -383,13 +387,13 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
     This version fits each loop individually, using the overlapping
     shoulder regions to determine the best fit.
     '''
-    log = ''
+
     matches, mismatches, gaps = aln_score(alignment)
     if gaps == 0:
         print('Warning: no gaps detected')
         return acceptor
-    
-    dd = [] # dd will hold the indices of the donor residues
+
+    dd = []  # dd will hold the indices of the donor residues
     i = 0
     for a in alignment[0]:
         if a != '-':
@@ -397,8 +401,8 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
             i += 1
         else:
             dd.append(-1)
-    
-    di = [] # di will hold the indices of the acceptor residues
+
+    di = []  # di will hold the indices of the acceptor residues
     i = 0
     for a in alignment[1]:
         if a != '-':
@@ -429,10 +433,8 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
     for i in range(n_chunks):
         if di[chunk_starts[i]] == -1:
             cid = {'source': 'donor', 'start': chunk_starts[i], 'end': chunk_ends[i]}
-            log += f'building residues {chunk_starts[i]} to {chunk_ends[i]} from donor\n'
         else:
             cid = {'source': 'acceptor', 'start': chunk_starts[i], 'end': chunk_ends[i]}
-            log += f'building residues {chunk_starts[i]} to {chunk_ends[i]} from acceptor\n'
         chunks.append(cid)
 
     # Adjust if trimming is requested
@@ -456,7 +458,7 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
                 sstart -= 1
                 valid = sstart > -1 and chunk['start'] - sstart <= shoulder_width
             shoulders.append(swid)
-            
+
             # look rightwards...
             sstart = chunk['end'] + 1
             valid = sstart < len(di)
@@ -477,7 +479,7 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
             j = di[chunk['end']]
             sel = acceptor.topology.select(f'resid {i} to {j}')
             t_chunks.append(acceptor.atom_slice(sel))
-            
+
         elif chunk['source'] == 'donor':
             ic += 1
             lr = shoulders[2*ic]
@@ -495,7 +497,7 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
                 i_a = di[chunk['end'] + 1]
                 txtd = f'(resid {i_d} to {i_d + rr} and backbone)'
                 txta = f'(resid {i_a} to {i_a + rr} and backbone)'
-            
+
             seld = donor.topology.select(txtd)
             sela = acceptor.topology.select(txta)
             tdd = donor.superpose(acceptor, atom_indices=seld, ref_atom_indices=sela)
@@ -518,7 +520,7 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
             _ = newtop.add_atom(a.name, a.element, rid)
     newtop._bonds = t_out.topology._bonds
     t_out.topology = newtop
-    return t_out, log
+    return t_out, chunks
 
 
 def merge_old(acceptor, donor, alignment, shoulder_width=3,
@@ -600,38 +602,59 @@ def loopfix(acceptor, donor, cutoff=0.02, shoulder_width=3,
     remediate acceptor using residues from donor
     '''
     donor_at_acceptor, alignment = match_align(donor, acceptor, cutoff=cutoff)
-    fixed_acceptor, log = merge(acceptor, donor_at_acceptor,
+    fixed_acceptor, chunks = merge(acceptor, donor_at_acceptor,
                                 (alignment[0], alignment[2]),
                                 trim=trim, shoulder_width=shoulder_width,
                                 min_ca_displacement=min_ca_displacement)
-    return fixed_acceptor, log
+    return fixed_acceptor, chunks
 
 
 def complete(t_in):
     '''
     Complete a structure by adding missing atoms using pdb4amber.
+
+    The difference from pdb4amber itself is that this version included NQH
+    flips
+
     Args:
         t_in (MDTrajectory): input structure
 
     '''
 
     _check_available('pdb4amber')
+    _check_available('reduce')
     # Step 1: add missing heavy atoms
     pdb4amber = SubprocessTask(
-        'pdb4amber -i in.pdb --add-missing-atoms --no-conect > out.pdb'
+        'pdb4amber -i in.pdb --add-missing-atoms --no-conect | sed "s/HIE/HIS/g" > out.pdb'
         )
     pdb4amber.set_inputs(['in.pdb'])
     pdb4amber.set_outputs(['out.pdb'])
     out = pdb4amber(t_in)
-    # Step 2; remove all hydrogens, then run through reduce, though its
-    # only the NQH flips and HIX states we care about:
+    # Step 2; remove all current hydrogens, then run through reduce, though its
+    # only the NQH flips:
     reduce = SubprocessTask(
         'reduce -Trim in.pdb | reduce -BUILD - | reduce -Trim - > out.pdb'
         )
     reduce.set_inputs(['in.pdb'])
-    reduce.set_outputs(['out.pdb'])
-    out = reduce(out)
+    # reduce can return non-zero error codes even when things are ok (enough)
+    reduce.set_outputs(['out.pdb', 'DEBUGINFO'])
+    out, info = reduce(out)
+    if isinstance(info, CalledProcessError):
+        print("Warning: reduce returned with non-zero exit code")
+    # Step 3: Correct the HIS residues
+    pdb4amber = SubprocessTask(
+        'pdb4amber -i in.pdb --reduce --no-conect > out.pdb'
+        )
+    pdb4amber.set_inputs(['in.pdb'])
+    pdb4amber.set_outputs(['out.pdb'])
+    out = pdb4amber(out)
+
     t_out = mdt.load_pdb(out, standard_names=False)
+    # Step 4: Remove hydrogens
+    t_out = t_out.atom_slice(t_out.topology.select('not element H'))
+    if not isinstance(t_in, mdt.Trajectory):
+        t_in = mdt.load_pdb(t_in, standard_names=False)
+    print(pdb_diff(t_in, t_out))
     return t_out
 
 
@@ -845,6 +868,36 @@ def search_accession(fasta, session=None):
     return accessions
 
 
+def alpha_search(seq):
+    '''
+    Search the Alphafold database for matches to a given sequence.
+    '''
+    url = f'https://alphafold.com/search/sequence/{seq}'
+    result = requests.get(url)
+    soup = BeautifulSoup(result.text, features="html.parser")
+
+    jsons = soup.find_all("script", type="application/json")
+    if len(jsons) == 0:
+        raise ValueError(f'Error: no results found for the sequence {seq}')
+    docs = []
+    for j in jsons:
+        d = json.loads(jsons[0].get_text())
+        for k in d.keys():
+            if k != '__nghData__' and 'docs' in d[k]['b']:
+                docs += d[k]['b']['docs']
+
+    matches = []
+    for d in docs:
+        identity = [v['value'] for v in d['sequenceData']['sequence_stats'] if v['label'] == 'Identity'][0]
+        match = {
+            'entryId': d['entryId'],
+            'uniprotAccession': d['uniprotAccession'],
+            'identity': identity
+        }
+        matches.append(match)
+    return matches
+
+
 def alpha_get(uniprot_id, session=None):
     '''
     Get the Alphafold structure with the given Uniprot Id
@@ -945,15 +998,14 @@ def add_h(t_in, chimera='chimera', mode='amber'):
     return t_out, log
 
 
-def alpha_match(prot_in, chimerax='chimerax', trim=True):
+def alpha_match(prot_in, max_matches=None):
     '''
-    Find an Alphafold structure that matches the supplied protein
+    Find Alphafold structure for each chain in the supplied protein
     structure file.
 
     The input can be an MDTraj trajectory, a Crossflow FileHandle, a Path, or a
     filename (string)
     '''
-    _check_available(chimerax)
 
     if not isinstance(prot_in, (str, Path, mdt.Trajectory, FileHandle)):
         raise TypeError(f'Unsupported input type {type(prot_in)})')
@@ -964,35 +1016,33 @@ def alpha_match(prot_in, chimerax='chimerax', trim=True):
     if not isinstance(prot_in, mdt.Trajectory):
         # Convert to MDTraj trajectory
         prot_in = mdt.load(prot_in)
-    if prot_in.topology.n_chains != 1:
-        raise ValueError('Input structure must contain exactly one chain')
+    result = {}
 
-    fh = FileHandler()
-    script = fh.create('script')
-    if trim:
-        script.write_text('open infile.pdb\nalphafold match #1\n'
-                          'save outfile.pdb #2\nquit')
-    else:
-        script.write_text('open infile.pdb\nalphafold match #1 trim false\n'
-                          'save outfile.pdb #2\nquit')
-    find_af = SubprocessTask(f"{chimerax} --nogui < script")
-    find_af.set_inputs(['script', 'infile.pdb'])
-    find_af.set_outputs(['outfile.pdb', 'STDOUT'])
-    find_af.set_constant('script', script)
+    for ic, c in enumerate(prot_in.topology.chains):
+        cindx = [a.index for a in c.atoms]
+        tc = prot_in.atom_slice(cindx)
+        seq = tc.topology.to_fasta()[0]
+        if len(seq) > 10:
+            try:
+                matches = alpha_search(seq)
+            except ValueError as e:
+                print(f'Error searching for chain {ic}: {e}')
+                continue
+            n_matches = len(matches)
+            if n_matches == 0:
+                print(f'No matches found for chain {ic}')
+                continue
 
-    outfile, log = find_af(prot_in)
-    lines = log.split('\n')
-    for i, l in enumerate(lines):
-        if 'ERROR' in l:
-            raise Exception(f'Error: {lines[i+1]}')
-
-    return mdt.load_pdb(outfile, standard_names=False), log
+            if max_matches is not None:
+                n_matches = min(n_matches, max_matches)
+            result[ic] = matches[:n_matches]
+    return result
 
 
 def alpha_loopfix(inpdb, outpdb,
                   max_shoulder_size=3,
                   min_ca_displacement=0.1,
-                  chimerax='chimerax',
+                  uniprot_ids=[],
                   trim=True):
     """
     Fix missing residues in a PDB file using AlphaFold.
@@ -1004,34 +1054,87 @@ def alpha_loopfix(inpdb, outpdb,
         min_ca_displacement (float): minimum displacement of the CA
                                      atom from the original structure
                                      to be replaced by AlphaFold
-        chimerax (str): command to invoke ChimeraX
+        uniprot_ids (list): list of UniProt IDs for the input structure
         trim (bool): whether to trim the AlphaFold
                       structure to match the input structure
 
     """
     _check_exists(inpdb)
-    _check_available(chimerax)
+
     if not trim:
         print('Warning: trim=False, the output structure will contain'
-              ' all residues from the AlphaFold structure.')
+              ' all residues from the AlphaFold structure(s).')
 
-    t = mdt.load_pdb(inpdb, standard_names=False)
+    t = mdt.load_pdb(inpdb, standard_names=True)
+    tp = t.atom_slice(t.topology.select('protein'))
+    tn = t.atom_slice(t.topology.select('not protein'))
+    tm = []
+    for m in tp.topology.find_molecules():
+        aindx = sorted([a.index for a in m])
+        tm.append(tp.atom_slice(aindx))
+    if len(tm) != len(uniprot_ids):
+        raise ValueError('Error: number of UniProt IDs does not match'
+                         ' the number of protein chains in the input structure')
+    tas = [alpha_get(i) for i in uniprot_ids]
 
-    t_alpha, log = alpha_match(t, trim=False)
-
-    lines = log.split('\n')
-    for i, l in enumerate(lines):
-        if 'sequence similarity' in l:
-            print(l)
-        elif 'WARNING' in l:
-            print(f'{l} {lines[i+1]}')
-
-    t_fixed, log = loopfix(t, t_alpha, trim=trim,
-                           shoulder_width=max_shoulder_size,
-                           min_ca_displacement=min_ca_displacement)
-    t_fixed.save(outpdb)
-    print(log)
+    t_out = None
+    logs = ''
+    ioff = 1
+    for i, t_alpha in enumerate(tas):
+        t_fixed, chunks = loopfix(tm[i], t_alpha, trim=trim,
+                               shoulder_width=max_shoulder_size,
+                               min_ca_displacement=min_ca_displacement)
+        t_fixed.topology._bonds = []
+        logs += f'Chain {i} fixed:\n'
+        for chunk in chunks:
+            chunk_length = (chunk['end'] - chunk['start']) + 1
+            if chunk['source'] == 'donor':
+                logs += f" - residues {ioff} to {ioff + chunk_length - 1} built from {uniprot_ids[i]}\n"
+            ioff += chunk_length
+        if t_out is None:
+            t_out = t_fixed
+        else:
+            t_out = t_out.stack(t_fixed)
+    t_out = t_out.stack(tn)
+    for i, r in enumerate(t_out.topology.residues):
+        r.resSeq = i + 1  # reset residue numbers
+    t_out.save(outpdb)
+    print(logs)
     print(f'Fixed structure saved as {outpdb}.')
+
+
+def pdb_diff(t_before, t_after):
+    '''
+    Compare two PDB files.
+
+    Report differences in residue names, atom names, and coordinates.
+
+    '''
+    report = ''
+    for r1, r2 in zip(t_before.topology.residues, t_after.topology.residues):
+        if r1.name != r2.name:
+            report += f'{r1.name}{r1.resSeq}: modelled as {r2.name}\n'
+        r1_atoms = [a.name for a in r1.atoms]
+        r2_atoms = [a.name for a in r2.atoms]
+        added_Heavy_atoms = [a for a in r2_atoms if a not in r1_atoms and a[0] != 'H']
+        if added_Heavy_atoms:
+            report += f'{r1.name}{r1.resSeq}: Added heavy atoms: {", ".join(added_Heavy_atoms)}\n'
+
+        if r1.name in ('HIS', 'ASN', 'GLN'):
+            # Check for NQH flips
+            if r1.name == 'HIS':
+                a1 = [a.index for a in r1.atoms if a.name == 'ND1']
+                a2 = [a.index for a in r2.atoms if a.name == 'ND1']
+            elif r1.name == 'ASN':
+                a1 = [a.index for a in r1.atoms if a.name == 'OD1']
+                a2 = [a.index for a in r2.atoms if a.name == 'OD1']
+            elif r1.name == 'GLN':
+                a1 = [a.index for a in r1.atoms if a.name == 'OE1']
+                a2 = [a.index for a in r2.atoms if a.name == 'OE1']
+            if len(a1) > 0 and len(a2) > 0:
+                if not np.allclose(t_before.xyz[0, a1], t_after.xyz[0, a2], atol=0.01):
+                    report += f'{r1.name}{r1.resSeq}: NQH flip\n'
+    return report
 
 
 #  Part 5: Tools for (Amber) MD simulation preparation
@@ -1267,136 +1370,6 @@ def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
     return prmtop, inpcrd
 
 
-def _alpha_loopfix(inpdb, outpdb,
-                   max_shoulder_size=3,
-                   min_ca_displacement=0.1,
-                   chimerax='chimerax',
-                   trim=True):
-    """
-    Fix missing residues in a PDB file using AlphaFold.
-    Args:
-        inpdb (str): input PDB file name
-        outpdb (str): output PDB file name
-        max_shoulder_size (int): maximum size of a loop shoulder
-                                 to be replaced by AlphaFold
-        min_ca_displacement (float): minimum displacement of the CA
-                                     atom from the original structure
-                                     to be replaced by AlphaFold
-        chimerax (str): command to invoke ChimeraX
-        trim (bool): whether to trim the AlphaFold
-                      structure to match the input structure
-
-    """
-    _check_exists(inpdb)
-    _check_available(chimerax)
-    if not trim:
-        print('Warning: trim=False, the output structure will contain'
-              ' all residues from the AlphaFold structure.')
-
-    t = mdt.load_pdb(inpdb, standard_names=False)
-
-    t = gapsplit(t)
-
-    ms = t.topology.find_molecules()
-    if len(ms) == 1:
-        print('No gaps to fill.')
-        if trim:
-            return
-    elif len(ms) == 2:
-        print('Structure contains 1 gap.')
-    else:
-        print(f'Structure contains {len(ms)-1} gaps.')
-
-    outfile, log = alpha_match(t, chimerax=chimerax, trim=trim)
-
-    lines = log.split('\n')
-    for i, l in enumerate(lines):
-        if 'sequence similarity' in l:
-            print(l)
-        elif 'WARNING' in l:
-            print(f'{l} {lines[i+1]}')
-
-    if not outfile:
-        raise RuntimeError(f'Error: AlphaFold search failed.\n{log}.')
-
-    ta = mdt.load_pdb(outfile, standard_names=False)
-
-    residues = []
-    for i in range(ta.topology.n_residues):
-        r = dict(alpha_res=ta.topology.residue(i), alpha_idx=i)
-        residues.append(r)
-
-    ref_seq = ta.topology.to_fasta()[0]
-    new_indx = []
-    d_from_gap = []
-    for im, m in enumerate(ms):
-        sel = [a.index for a in m]
-        frag = t.topology.subset(sel)
-        frag_seq = frag.to_fasta()[0]
-        start = ref_seq.index(frag_seq)
-        fl = len(frag_seq)
-        for i in range(fl):
-            new_indx.append(i + start)
-            if im == 0:
-                d_from_gap.append(fl - i)
-            elif im == len(ms) - 1:
-                d_from_gap.append(i+1)
-            else:
-                d_from_gap.append(min(i, fl-i))
-
-    pair_d = []
-    for i, j in enumerate(new_indx):
-        sel_i = t.topology.select(f'resid {i} and name CA')[0]
-        sel_j = ta.topology.select(f'resid {j} and name CA')[0]
-        dxyz = t.xyz[0, sel_i] - ta.xyz[0, sel_j]
-        pair_d.append(np.linalg.norm(dxyz))
-
-    for i, j in enumerate(new_indx):
-        residues[j]['xtal_idx'] = i
-        residues[j]['d_from_gap'] = d_from_gap[i]
-        residues[j]['xtal_res'] = t.topology.residue(i)
-        residues[j]['pair_d'] = pair_d[i]
-
-    if 'pair_d' not in residues[0]:
-        # Gap (extra N-termnal residues) at the start, use the first residue f
-        # rom the alphafold structure
-        alist = [a.index for a in residues[0]['alpha_res'].atoms]
-        new_traj = ta.atom_slice(alist)
-    elif residues[0]['d_from_gap'] <= max_shoulder_size and \
-      residues[0]['pair_d'] > min_ca_displacement:
-        alist = [a.index for a in residues[0]['alpha_res'].atoms]
-        new_traj = ta.atom_slice(alist)
-    else:
-        alist = [a.index for a in residues[0]['xtal_res'].atoms]
-        new_traj = t.atom_slice(alist)
-    for r in residues[1:]:
-        if 'pair_d' not in r:
-            # Use the alphafold structure for this residue
-            alist = [a.index for a in r['alpha_res'].atoms]
-            new_traj = new_traj.stack(ta.atom_slice(alist))
-            print(f"Inserting missing residue {r['alpha_res']}.")
-        elif (r['d_from_gap'] <= max_shoulder_size and
-              r['pair_d'] > min_ca_displacement):
-            # Use the alphafold structure for this residue
-            alist = [a.index for a in r['alpha_res'].atoms]
-            new_traj = new_traj.stack(ta.atom_slice(alist))
-            print(f"Replacing {r['xtal_res']} with {r['alpha_res']}.")
-        else:
-            # Use the crystal structure for this residue
-            alist = [a.index for a in r['xtal_res'].atoms]
-            new_traj = new_traj.stack(t.atom_slice(alist))
-
-    new_top = mdt.Topology()
-    c = new_top.add_chain()
-    for r in new_traj.topology.residues:
-        nr = new_top.add_residue(r.name, c, r.resSeq)
-        for a in r.atoms:
-            new_top.add_atom(a.name, a.element, nr)
-    new_traj.topology = new_top
-    new_traj.save(outpdb)
-    print(f'Fixed structure saved as {outpdb}.')
-
-
 def ambpdb(inpcrd, prmtop):
     '''
     Convert an Amber inpcrd file to a PDB file.
@@ -1452,6 +1425,33 @@ def make_refc(pdb, inpcrd, prmtop, refc):
     print(f'Reference coordinates saved as {refc}.')
 
 
+def indices_to_mask(indices):
+    '''
+    Convert a list of atom indices into an Amber-style atom mask
+    '''
+    mask = f'@{indices[0]}'
+    if len(indices) == 1:
+        return mask
+
+    c = ' '
+    for i in range(1, len(indices)):
+        if indices[i] - indices[i-1] == 1:
+            c += 'x'
+        else:
+            c += ' '
+
+    for i in range(1, len(c)-1):
+        if c[i] == ' ':
+            if c[i-1] == 'x':
+                mask += f'-{indices[i-1]}'
+            mask += f',{indices[i]}'
+    if c[-1] == 'x':
+        mask += f'-{indices[-1]}'
+    else:
+        mask += f',{indices[-1]}'
+    return mask
+
+
 def rest_min(tin, kr=1.0, maxcyc=200):
     '''
     Perform restrained minimization on a trajectory.
@@ -1468,9 +1468,15 @@ def rest_min(tin, kr=1.0, maxcyc=200):
     '''
 
     try:
-        return rest_min_omm(tin, kr=kr, maxcyc=maxcyc)
+        t_out, log = rest_min_omm(tin, kr=kr, maxcyc=maxcyc)
     except ImportError:
-        return rest_min_sander(tin, kr=kr, maxcyc=maxcyc)
+        t_out, log = rest_min_sander(tin, kr=kr, maxcyc=maxcyc)
+    # set chain ids to None so they are automatically set to A,B,C etc.
+    # when the trajectory is saved in PDB format.
+    for c in t_out.topology.chains:
+        c.chain_id = None
+
+    return t_out, log
 
 
 def rest_min_omm(tin, kr=1.0, maxcyc=200):
@@ -1494,9 +1500,12 @@ def rest_min_omm(tin, kr=1.0, maxcyc=200):
 
     np = tin.topology.select('not protein')
     if len(np) > 0:
-        raise ValueError(
-            'Error: input trajectory must contain only protein atoms')
-    prmtop, inpcrd = leap(tin, ['protein.ff14SB'])
+        non_standard_residues = set([tin.topology.atom(i).residue.name for i in np])
+        for r in non_standard_residues:
+            if r not in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'HOH']:
+                raise ValueError(
+                    'Error: input trajectory must contain only protein and water atoms')
+    prmtop, inpcrd = leap(tin, ['protein.ff14SB', 'water.tip3p'])
     pdb = ambpdb(inpcrd, prmtop)
     OPRMTOP = AmberPrmtopFile(prmtop)
     OINPCRD = AmberInpcrdFile(inpcrd)

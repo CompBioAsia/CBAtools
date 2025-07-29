@@ -2,7 +2,7 @@
 
 from argparse import ArgumentParser
 import mdtraj as mdt
-from cba_tools.cba_tools import loopfix, param, make_refc
+from cba_tools.cba_tools import loopfix, param, make_refc, alpha_match
 from cba_tools.cba_tools import complete, rest_min, alpha_loopfix
 
 
@@ -50,12 +50,14 @@ def loopfix_cli():
 
     t_in = mdt.load_pdb(args.input_file, standard_names=False)
     t_donor = mdt.load_pdb(args.donor_file, standard_names=False)
-    fixed, log = loopfix(t_in,
+    fixed, chunks = loopfix(t_in,
                          t_donor,
                          trim=args.trim)
 
     fixed.save(args.output_file)
-    print(log)
+    for chunk in chunks:
+        print(f"residues {chunk['start']} to {chunk['end']} built from {chunk['source']}")
+    print(f"Fixed structure saved as {args.output_file}.")
 
 
 def make_refc_cli():
@@ -85,7 +87,7 @@ def prepare_protein_cli():
 
     parsed_args = parser.parse_args()
     t_out = complete(parsed_args.inpdb)
-    t_out.write(parsed_args.outpdb)
+    t_out.save(parsed_args.outpdb)
 
 
 def rest_min_cli():
@@ -125,6 +127,27 @@ def alpha_loopfix_cli():
                         help="Fixed PDB file.", required=True)
     parser.add_argument("-t", "--trim", action="store_true",
                         help="Trim the fixed PDB file to match the input.")
+    parser.add_argument("-u", "--uniprot_ids", nargs='*',
+                        help="List of UniProt IDs for the input structure.")
     args = parser.parse_args()
 
-    alpha_loopfix(args.input_file, args.output_file, trim=args.trim)
+    alpha_loopfix(args.input_file, args.output_file, trim=args.trim,
+                  uniprot_ids=args.uniprot_ids)
+
+
+def alpha_match_cli():
+    parser = ArgumentParser(
+        description="Find Alphafold structure for each chain in the supplied protein structure."
+    )
+    parser.add_argument("-i", "--input_file",
+                        help="Input protein structure file.", required=True)
+    parser.add_argument("-m", "--max_matches", type=int, default=None,
+                        help="Maximum number of matches to return per chain.")
+    args = parser.parse_args()
+
+    result = alpha_match(args.input_file, max_matches=args.max_matches)
+
+    for chain, matches in result.items():
+        print(f"Chain {chain}:")
+        for match in matches:
+            print(f" - {match['uniprotAccession']:10s}: {match['identity']}% match")
