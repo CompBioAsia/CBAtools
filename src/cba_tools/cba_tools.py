@@ -1247,15 +1247,18 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
             n_cl = n_ions
         n_na = max(n_na, 0)
         n_cl = max(n_cl, 0)
-        prmtop, inpcrd = leap(
+        prmtop, inpcrd, stdout = leap(
             inpdb, forcefields, het_names=het_names,
             solvate=solvate, buffer=buffer, het_dir=het_dir,
             n_na=n_na, n_cl=n_cl)
-
-    prmtop.save(outprmtop)
-    print(f'Parameters written to {outprmtop}')
-    inpcrd.save(outinpcrd)
-    print(f'Coordinates written to {outinpcrd}')
+    if prmtop in None or inpcrd is None:
+        print('Error in tleap:')
+        print(stdout)
+    else:
+        prmtop.save(outprmtop)
+        print(f'Parameters written to {outprmtop}')
+        inpcrd.save(outinpcrd)
+        print(f'Coordinates written to {outinpcrd}')
 
 
 @cache
@@ -1358,7 +1361,7 @@ def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
     '''
     _check_available('tleap')
     inputs = ['script', 'system.pdb']
-    outputs = ['system.prmtop', 'system.inpcrd']
+    outputs = ['system.prmtop', 'system.inpcrd', 'STDOUT']
     script = "".join([f'source leaprc.{f}\n' for f in ff])
 
     if solvate:
@@ -1395,8 +1398,8 @@ def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
         if len(het_names) > 0:
             for r in het_names:
                 args += [f'{Path(het_dir)}/{r}.mol2', f'{Path(het_dir)}/{r}.frcmod']
-    prmtop, inpcrd = tleap(*args)
-    return prmtop, inpcrd
+    prmtop, inpcrd, stdout = tleap(*args)
+    return prmtop, inpcrd, stdout
 
 
 def ambpdb(inpcrd, prmtop):
@@ -1543,8 +1546,12 @@ def rest_min_omm(tin, tref=None, kr=1.0, maxcyc=200):
                 raise ValueError(
                     'Error: input trajectory must contain only protein and water atoms')
 
-    prmtop, inpcrd = leap(tin, ['protein.ff14SB', 'water.tip3p'])
-    _, refc = leap(tref, ['protein.ff14SB', 'water.tip3p'])
+    prmtop, inpcrd, stdout = leap(tin, ['protein.ff14SB', 'water.tip3p'])
+    if prmtop is None or inpcrd is None:
+        raise RuntimeError(f'Error in tleap: {stdout}')
+    _, refc, stdout = leap(tref, ['protein.ff14SB', 'water.tip3p'])
+    if prmtop is None or inpcrd is None:
+        raise RuntimeError(f'Error in tleap: {stdout}')
     pdb = ambpdb(inpcrd, prmtop)
     OPRMTOP = AmberPrmtopFile(prmtop)
     OINPCRD = AmberInpcrdFile(inpcrd)
