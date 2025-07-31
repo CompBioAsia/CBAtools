@@ -102,6 +102,35 @@ import json
 #  Part 1: Various utilities
 
 
+def bumps(prot_in, cutoff=0.2):
+    '''
+    Report close contacts in a protein structure
+    
+    '''
+    if not isinstance(prot_in, (str, Path, mdt.Trajectory, FileHandle)):
+        raise TypeError(f'Unsupported input type {type(prot_in)})')
+
+    if isinstance(prot_in, (str, Path)):
+        _check_exists(prot_in)
+
+    if not isinstance(prot_in, mdt.Trajectory):
+        # Convert to MDTraj trajectory
+        prot_in = mdt.load(prot_in)
+    contacts = []
+    for i in range(prot_in.topology.n_residues - 2):
+        for j in range(i+2, prot_in.topology.n_residues):
+            contacts.append([i, j])
+    c = mdt.compute_contacts(prot_in, contacts)
+    d = c[0][0]
+    
+    result = ''
+    for i in np.argsort(d):
+        if d[i] < 0.2:
+            result += f'{str(prot_in.topology.residue(contacts[i][0])):6s} - '
+            result += f'{str(prot_in.topology.residue(contacts[i][1])):6s} {d[i]:.3f}\n'
+    return result
+
+
 def smiles_to_traj(smi, pH=7.0):
     '''
     Convert an input SMILES representation to a (1 frame) MDTraj trajectory.
@@ -1452,7 +1481,7 @@ def indices_to_mask(indices):
     return mask
 
 
-def rest_min(tin, kr=1.0, maxcyc=200):
+def rest_min(tin, tref=None, kr=1.0, maxcyc=200):
     '''
     Perform restrained minimization on a trajectory.
 
@@ -1460,6 +1489,7 @@ def rest_min(tin, kr=1.0, maxcyc=200):
 
     Args:
         tin (mdt.Trajectory): input trajectory
+        tref (mdt.Trajectory, optional): reference coordinates
         kr (float): force constant for the restraint (default: 1.0)
         maxcyc (int): maximum number of cycles (default: 200)
 
@@ -1468,23 +1498,26 @@ def rest_min(tin, kr=1.0, maxcyc=200):
     '''
 
     try:
-        t_out, log = rest_min_omm(tin, kr=kr, maxcyc=maxcyc)
+        t_out, log = rest_min_omm(tin, tref=tref, kr=kr, maxcyc=maxcyc)
     except ImportError:
-        t_out, log = rest_min_sander(tin, kr=kr, maxcyc=maxcyc)
+        t_out, log = rest_min_sander(tin, tref=tref, kr=kr, maxcyc=maxcyc)
     # set chain ids to None so they are automatically set to A,B,C etc.
     # when the trajectory is saved in PDB format.
     for c in t_out.topology.chains:
         c.chain_id = None
-
+    bumpinfo = bumps(t_out)
+    if bumpinfo != '':
+        print('Warning: close contacts detected in output structure')
     return t_out, log
 
 
-def rest_min_omm(tin, kr=1.0, maxcyc=200):
+def rest_min_omm(tin, tref=None, kr=1.0, maxcyc=200):
     '''
     Perform restrained minimization on a trajectory using OpenMM.
 
     Args:
         tin (mdt.Trajectory): input trajectory
+        tref (mdt.Trajectory, optional): reference coordinates
         kr (float): force constant for the restraint (default: 1.0)
         maxcyc (int): maximum number of cycles (default: 200)
 
@@ -1498,6 +1531,10 @@ def rest_min_omm(tin, kr=1.0, maxcyc=200):
     from openmm import CustomExternalForce
     from openmm.unit import kilocalories_per_mole, angstroms
 
+    if tref is None:
+        tref = tin
+    if tin.topology != tref.topology:
+        raise ValueError('Error: topologies of input and reference structures do not match')
     np = tin.topology.select('not protein')
     if len(np) > 0:
         non_standard_residues = set([tin.topology.atom(i).residue.name for i in np])
@@ -1505,10 +1542,13 @@ def rest_min_omm(tin, kr=1.0, maxcyc=200):
             if r not in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'HOH']:
                 raise ValueError(
                     'Error: input trajectory must contain only protein and water atoms')
+
     prmtop, inpcrd = leap(tin, ['protein.ff14SB', 'water.tip3p'])
+    _, refc = leap(tref, ['protein.ff14SB', 'water.tip3p'])
     pdb = ambpdb(inpcrd, prmtop)
     OPRMTOP = AmberPrmtopFile(prmtop)
     OINPCRD = AmberInpcrdFile(inpcrd)
+    REFCRD = AmberInpcrdFile(refc)
 
     system = OPRMTOP.createSystem(
         nonbondedMethod=CutoffNonPeriodic,
@@ -1525,7 +1565,7 @@ def rest_min_omm(tin, kr=1.0, maxcyc=200):
     force.addPerParticleParameter("y0")
     force.addPerParticleParameter("z0")
     for i, atom in enumerate(OPRMTOP.topology.atoms()):
-        force.addParticle(i, OINPCRD.positions[i].value_in_unit(nanometer))
+        force.addParticle(i, REFCRD.positions[i].value_in_unit(nanometer))
     system.addForce(force)
 
     simulation = Simulation(OPRMTOP.topology, system, integrator)
@@ -1535,16 +1575,18 @@ def rest_min_omm(tin, kr=1.0, maxcyc=200):
         getPositions=True).getPositions(asNumpy=True)
 
     # Create a new trajectory with minimized positions
-    tmptop = mdt.load_topology(pdb)
-    if tmptop._atoms[1].name == 'H':
-        tmptop._atoms[1].name = 'H1'
-    tout = mdt.Trajectory(positions, tmptop)
+    tmptop = mdt.load_pdb(pdb, standard_names=False).topology
+    tin_ids = [(a.residue.name, a.residue.index, a.name) for a in tin.topology.atoms]
+    out_ids = [(a.residue.name, a.residue.index, a.name) for a in tmptop.atoms]
+    indx = [out_ids.index(i) for i in tin_ids]
+    
+    tout = mdt.Trajectory(positions[indx], tin.topology)
     log = f'Restrained minimization performed using OpenMM with force constant {kr} kcal/mol/Å² for {maxcyc} cycles.'
 
     return tout, log
 
 
-def rest_min_sander(tin, kr=1.0, maxcyc=200):
+def rest_min_sander(tin, tref=None, kr=1.0, maxcyc=200):
     '''
     Perform restrained minimization on a trajectory using Sander.
 
@@ -1556,20 +1598,30 @@ def rest_min_sander(tin, kr=1.0, maxcyc=200):
     Returns:
         mdt.Trajectory: minimized trajectory
     '''
+    if tref is None:
+        tref = tin
+    if tin.topology != tref.topology:
+        raise ValueError('Error: topologies of input and reference structures do not match')
+    
     np = tin.topology.select('not protein')
     if len(np) > 0:
-        raise ValueError(
-            'Error: input trajectory must contain only protein atoms')
+        non_standard_residues = set([tin.topology.atom(i).residue.name for i in np])
+        for r in non_standard_residues:
+            if r not in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'HOH']:
+                raise ValueError(
+                    'Error: input trajectory must contain only protein and water atoms')
+            
     _check_available('sander')
-    prmtop, inpcrd = leap(tin, ['protein.ff14SB'])
+    prmtop, inpcrd = leap(tin, ['protein.ff14SB', 'water.tip3p'])
+    _, refc = leap(tref, ['protein.ff14SB', 'water.tip3p'])
     rmin = SubprocessTask('sander -O -i min.in -o min.out -p prmtop'
-                          ' -c in.rst7 -r out.ncrst -ref in.rst7')
-    rmin.set_inputs(['min.in', 'prmtop', 'in.rst7'])
+                          ' -c in.rst7 -r out.ncrst -ref ref.rst7')
+    rmin.set_inputs(['min.in', 'prmtop', 'in.rst7', 'ref.rst7'])
     rmin.set_outputs(['min.out', 'out.ncrst'])
     # Create the input file for sander
     min_in = f"""Minimization
  &cntrl
-    imin=1, maxcyc={maxcyc},
+    imin=1, maxcyc={maxcyc}, ncyc=20,
     ntpr=5,
     ntr=1,
     igb=6,
@@ -1582,10 +1634,16 @@ def rest_min_sander(tin, kr=1.0, maxcyc=200):
     minin.write_text(min_in)
 
     # Perform the minimization
-    log, restart = rmin(minin, prmtop, inpcrd)
+    log, restart = rmin(minin, prmtop, inpcrd, refc)
 
     # Check for errors in the log
     if 'NSTEP' not in log.read_text():
         raise RuntimeError(f'Error: minimization failed.\n{log}')
-    tout = mdt.load(restart, top=prmtop)
-    return tout, log.read_text()
+    pdb = ambpdb(inpcrd, prmtop)
+    tmptop = mdt.load_pdb(pdb, standard_names=False).topology
+    tin_ids = [(a.residue.name, a.residue.index, a.name) for a in tin.topology.atoms]
+    out_ids = [(a.residue.name, a.residue.index, a.name) for a in tmptop.atoms]
+    indx = [out_ids.index(i) for i in tin_ids]
+    tout = mdt.load(restart, top=tmptop)
+
+    return tout.atom_slice(indx), log.read_text()
