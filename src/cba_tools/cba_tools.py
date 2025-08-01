@@ -579,8 +579,8 @@ def complete(pdb_in):
     # Step 4: Remove hydrogens
     t_out = t_out.atom_slice(t_out.topology.select('not element H'))
     # renumber atoms so conect records are right:
-    for a in t_out.topology.atoms:
-        a.sequence = a.index
+    for i, a in enumerate(t_out.topology.atoms):
+        a.sequence = i + 1
     pdb_out = traj_to_pdb(t_out)
     print(pdb_diff(pdb_in, pdb_out))
     return pdb_out
