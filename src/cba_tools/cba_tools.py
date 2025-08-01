@@ -1358,8 +1358,8 @@ def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
 
     if pdbref is None:
         pdbref = pdbin
-    tin = mdt.load(pdbin)
-    tref = mdt.load(pdbref)
+    tin = mdt.load_pdb(pdbin, standard_names=False)
+    tref = mdt.load_pdb(pdbref, standard_names=False)
     if tin.topology != tref.topology:
         raise ValueError('Error: topologies of input and reference structures do not match')
     np = tin.topology.select('not protein')
