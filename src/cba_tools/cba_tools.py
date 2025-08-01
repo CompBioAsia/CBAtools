@@ -516,6 +516,16 @@ def loopfix(acceptor, donor, cutoff=0.02, shoulder_width=3,
             min_ca_displacement=0.1, trim=True):
     '''
     remediate acceptor using residues from donor
+
+    Args:
+        acceptor (path-like): PDB file to be remediated
+        donor (path-like): PDB file acting as donor
+        cutoff (float): CA-CA cutoff (nm) for matching pairs
+        shoulder_width (int): max number of 'shoulder' residues to use for
+                              least-squares fitting of loops
+        min_ca_displacement (float): no longer used
+        trim (bool): If True, N- and C-terminii of the donor are not extended
+
     '''
     donor_at_acceptor, alignment = match_align(donor, acceptor, cutoff=cutoff)
     fixed_acceptor, chunks = merge(acceptor, donor_at_acceptor,
@@ -533,7 +543,7 @@ def complete(pdb_in):
     flips
 
     Args:
-        pdb_in (FileHandle): input structure in PDB format
+        pdb_in (path-like): input structure in PDB format
 
     '''
 
@@ -568,6 +578,9 @@ def complete(pdb_in):
     t_out = mdt.load_pdb(out, standard_names=False)
     # Step 4: Remove hydrogens
     t_out = t_out.atom_slice(t_out.topology.select('not element H'))
+    # renumber atoms so conect records are right:
+    for a in t_out.topology.atoms:
+        a.sequence = a.index
     pdb_out = traj_to_pdb(t_out)
     print(pdb_diff(pdb_in, pdb_out))
     return pdb_out
@@ -986,9 +999,9 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
     Parameterize a PDB file for AMBER simulations.
 
     Args:
-        inpdb (str): name of input PDB file
-        outprmtop (str): name of output prmtop file
-        outinpcrd (str): name of output inpcrd file
+        inpdb (path-like): name of input PDB file
+        outprmtop (path-like): name of output prmtop file
+        outinpcrd (path-like): name of output inpcrd file
         het_names (None or list): 3-letter residue names for heterogens
         het_charges (None or list): Formal charges of each heterogen
         forcefields (None or list): List of forcefields to use
@@ -1237,10 +1250,10 @@ def make_refc(pdb, inpcrd, prmtop, refc):
     Make a reference coordinate file for an Amber simulation.
 
     Args:
-        pdb (str): input PDB file name
-        inpcrd (str): input inpcrd file name
-        prmtop (str): input prmtop file name
-        refc (str): output reference coordinate file name
+        pdb (path-like): input PDB file name
+        inpcrd (path-like): input inpcrd file name
+        prmtop (path-like): input prmtop file name
+        refc (path-like): output reference coordinate file name
 
     '''
     _check_exists(pdb)
