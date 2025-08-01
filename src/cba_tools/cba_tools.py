@@ -580,7 +580,7 @@ def complete(pdb_in):
     t_out = t_out.atom_slice(t_out.topology.select('not element H'))
     # renumber atoms so conect records are right:
     for i, a in enumerate(t_out.topology.atoms):
-        a.sequence = i + 1
+        a.serial = i + 1
     pdb_out = traj_to_pdb(t_out)
     print(pdb_diff(pdb_in, pdb_out))
     return pdb_out
@@ -945,7 +945,7 @@ def alpha_loopfix(inpdb,
     for i, r in enumerate(t_out.topology.residues):
         r.resSeq = i + 1   # reset residue numbers
     for i, a in enumerate(t_out.topology.atoms):
-        a.sequence = i + 1  # reset atom sequence numbers
+        a.serial = i + 1  # reset atom serial numbers
     return traj_to_pdb(t_out), logs
 
 
