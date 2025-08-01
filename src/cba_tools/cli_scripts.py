@@ -88,8 +88,8 @@ def prepare_protein_cli():
                         required=True)
 
     parsed_args = parser.parse_args()
-    t_out = complete(parsed_args.inpdb)
-    t_out.save(parsed_args.outpdb)
+    pdb_out = complete(parsed_args.inpdb)
+    pdb_out.save(parsed_args.outpdb)
 
 
 def rest_min_cli():
@@ -107,19 +107,16 @@ def rest_min_cli():
     parser.add_argument('--logfile', help='Log file for minimization output')
 
     parsed_args = parser.parse_args()
-    t_in = mdt.load_pdb(parsed_args.inpdb, standard_names=False)
-    if parsed_args.refpdb:
-        t_ref = mdt.load_pdb(parsed_args.refpdb, standard_names=False)
-    else:
-        t_ref = None
 
     try:
-        t_out, log = rest_min(t_in, tref=t_ref, maxcyc=parsed_args.maxcyc,
-                              kr=parsed_args.kr)
+        pdb_out, log = rest_min(parsed_args.inpdb,
+                                tref=parsed_args.refpdb,
+                                maxcyc=parsed_args.maxcyc,
+                                kr=parsed_args.kr)
     except Exception as e:
         print("Error during minimization:", e)
         return
-    t_out.save_pdb(parsed_args.outpdb)
+    pdb_out.save(parsed_args.outpdb)
     if parsed_args.logfile:
         with open(parsed_args.logfile, 'w') as log_file:
             log_file.write(log)

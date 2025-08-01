@@ -8,30 +8,17 @@
 #
 #   RDKit
 #   OpenBabel
-#   Chimera/ChimeraX
 #   AmberTools
 #   MDTraj
 #
 # The functions are:
 #
-#  smiles_to_traj: Generates a mdtraj.Trajectory for a
+#  smiles_to_pdb : Generates a PDB file for a
 #                  molecule from a SMILES string. Tries
 #                  to be intelligent about protonation
 #                  states of any ionizable groups. Useful
 #                  for ligand preparation. Internally uses
 #                  RDKit and OpenBabel.
-#
-#  add_h:          Adds hydrogen atoms to heavy-atom only
-#                  PDB format files. This is hard to get
-#                  right every time with an automated tool,
-#                  but the version here uses Chimera (or
-#                  ChimeraX) which is often succesful. It
-#                  also uses tools from AmberTools to 'clean
-#                  up' the resulting structure, particularly
-#                  setting the names of HIS residues to HID,
-#                  HIE, or HIP depending on the predicted
-#                  tautomer/ionization state. Internally uses
-#                  Chimera(X) and pdb4amber.
 #
 #   param:         A complete AMBER-focussed workflow to
 #                  prepare input files (coordinates and
@@ -51,10 +38,10 @@
 #                  A user-supplied 'donor' PDB file is used to supply,
 #                  where possible, loop residues missing from the 'acceptor'
 #                  PDB file.
-
+#
 #   alpha_loopfix: A tool to fix missing residues in a PDB file
-#                  It uses ChimeraX to search the Alphafold database
-#                  for a suitable 'donor' structure, then uses it to
+#                  A suitable 'donor' structure is obtained from
+#                  the Alphafold database and used to
 #                  fill in the missing loop residues.
 #
 #   complete:      A tool to complete a PDB file by adding missing
@@ -90,7 +77,6 @@ import shutil
 import requests
 from requests import exceptions
 # from conditional_cache import lru_cache
-from tempfile import NamedTemporaryFile
 # from retry_requests import retry
 from pathlib import Path
 from time import sleep
@@ -102,10 +88,24 @@ import json
 #  Part 1: Various utilities
 
 
+def traj_to_pdb(t):
+    '''
+    Convert an MDTraj trajectory to PDB format
+
+    Return as a FileHandle
+    '''
+    fh = FileHandler()
+    tmppdb = fh.create('tmp.pdb')
+    tmppdb.write_text('')  # to sidestep a bug
+    t.save(tmppdb)
+    pdbout = fh.load(tmppdb)
+    return pdbout
+
+
 def bumps(prot_in, cutoff=0.2):
     '''
     Report close contacts in a protein structure
-    
+
     '''
     if not isinstance(prot_in, (str, Path, mdt.Trajectory, FileHandle)):
         raise TypeError(f'Unsupported input type {type(prot_in)})')
@@ -122,7 +122,7 @@ def bumps(prot_in, cutoff=0.2):
             contacts.append([i, j])
     c = mdt.compute_contacts(prot_in, contacts)
     d = c[0][0]
-    
+
     result = ''
     for i in np.argsort(d):
         if d[i] < 0.2:
@@ -131,7 +131,7 @@ def bumps(prot_in, cutoff=0.2):
     return result
 
 
-def smiles_to_traj(smi, pH=7.0):
+def smiles_to_pdb(smi, pH=7.0):
     '''
     Convert an input SMILES representation to a (1 frame) MDTraj trajectory.
 
@@ -140,7 +140,7 @@ def smiles_to_traj(smi, pH=7.0):
         pH (float): target pH
 
     Returns:
-        t (MDTrajectory): 3D structure for the molecule
+        pdb: FileHandle for a PDB file of the molecule
         charge (int): Formal charge on the molecule.
 
     '''
@@ -155,10 +155,9 @@ def smiles_to_traj(smi, pH=7.0):
     mol_pH_H = Chem.AddHs(mol_pH)
     rdDistGeom.EmbedMolecule(mol_pH_H)
     fh = FileHandler()
-    tmp_pdb = fh.create('tmp.pdb')
-    tmp_pdb.write_text(Chem.MolToPDBBlock(mol_pH_H))
-    t_out = mdt.load_pdb(tmp_pdb, standard_names=False)
-    return t_out, charge
+    pdbout = fh.create('tmp.pdb')
+    pdbout.write_text(Chem.MolToPDBBlock(mol_pH_H))
+    return pdbout, charge
 
 
 # For the Smith-Waterman code:
@@ -303,32 +302,16 @@ def aln_score(alignment):
 #          represented as single-snapshot MDTrajectory files
 
 
-def trim_sequence(t_in, t_ref):
+def match_align(pdb_in, pdb_ref, cutoff=0.02):
     '''
-    Trim terminii of t_in to match tref by sequence
-    '''
-    aln = smith_waterman(t_in.topology.to_fasta()[0],
-                         t_ref.topology.to_fasta()[0])
-
-    nt = 0
-    while aln[1][nt] == '-':
-        nt += 1
-    nc = len(aln[1]) - 1
-    while aln[1][nc] == '-':
-        nc -= 1
-
-    t_out = t_in.atom_slice(t_in.topology.select(f'resid {nt} to {nc}'))
-    return t_out
-
-
-def match_align(t_in, t_ref, cutoff=0.02):
-    '''
-    Superimpose t_in onto t_ref, based on sequence alignment
+    Superimpose pdb_in onto pdb_ref, based on sequence alignment
 
     The C-alpha atoms used for least-squares fitting are iteratively pruned
     until all pairs are within cutoff nanometers.
 
     '''
+    t_in = mdt.load_pdb(pdb_in, standard_names=False)
+    t_ref = mdt.load_pdb(pdb_ref, standard_names=False)
     alignment = smith_waterman(t_in.topology.to_fasta()[0],
                                t_ref.topology.to_fasta()[0])
     i = -1
@@ -377,41 +360,16 @@ def match_align(t_in, t_ref, cutoff=0.02):
     for p in pairs:
         pairings[pair_pos[p]] = '|'
     alignment = (alignment[0],  ''.join(pairings), alignment[1])
-    return t_out, alignment
-
-
-def _append(traj1, traj2, i):
-    '''
-    Append residue i from traj2 to traj1
-    '''
-    if traj1 is None:
-        traj1 = traj2.atom_slice(
-            traj2.topology.select(f'resid {i}'))
-    else:
-        traj1 = traj1.stack(traj2.atom_slice(
-            traj2.topology.select(f'resid {i}')))
-    return traj1
-
-
-def _caca(traj1, i, traj2, j):
-    '''
-    Calculate the Calpha-Calpha distance between two residues
-    '''
-    indx1 = traj1.topology.select(f'resid {i} and name CA')
-    indx2 = traj2.topology.select(f'resid {j} and name CA')
-    if len(indx1) == 0 or len(indx2) == 0:
-        raise ValueError(f'Error: no CA atoms found for {i} and {j}')
-    dxyz = traj1.xyz[0, indx1] - traj2.xyz[0, indx2]
-    return np.linalg.norm(dxyz, axis=1)
+    return traj_to_pdb(t_out), alignment
 
 
 def merge(acceptor, donor, alignment, shoulder_width=3,
           min_ca_displacement=0.1, trim=True):
     '''
-    Merge two MDTraj trajectories based on a sequence alignment.
+    Merge two PDB files based on a sequence alignment.
 
-    Missing parts of the acceptor trajectory are filled in with
-    parts from the donor trajectory.
+    Missing parts of the acceptor PDB are filled in with
+    parts from the donor PDB.
 
     This version fits each loop individually, using the overlapping
     shoulder regions to determine the best fit.
@@ -502,12 +460,14 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
     # Now generate the aligned chunks as individual trajectories
     ic = -1
     t_chunks = []
+    t_donor = mdt.load_pdb(donor, standard_names=False)
+    t_acceptor = mdt.load_pdb(acceptor, standard_names=False)
     for chunk in chunks:
         if chunk['source'] == 'acceptor':
             i = di[chunk['start']]
             j = di[chunk['end']]
-            sel = acceptor.topology.select(f'resid {i} to {j}')
-            t_chunks.append(acceptor.atom_slice(sel))
+            sel = t_acceptor.topology.select(f'resid {i} to {j}')
+            t_chunks.append(t_acceptor.atom_slice(sel))
 
         elif chunk['source'] == 'donor':
             ic += 1
@@ -527,9 +487,9 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
                 txtd = f'(resid {i_d} to {i_d + rr} and backbone)'
                 txta = f'(resid {i_a} to {i_a + rr} and backbone)'
 
-            seld = donor.topology.select(txtd)
-            sela = acceptor.topology.select(txta)
-            tdd = donor.superpose(acceptor, atom_indices=seld, ref_atom_indices=sela)
+            seld = t_donor.topology.select(txtd)
+            sela = t_acceptor.topology.select(txta)
+            tdd = t_donor.superpose(t_acceptor, atom_indices=seld, ref_atom_indices=sela)
             i = dd[chunk['start']]
             j = dd[chunk['end']]
             sel = tdd.topology.select(f'resid {i} to {j}')
@@ -549,80 +509,7 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
             _ = newtop.add_atom(a.name, a.element, rid)
     newtop._bonds = t_out.topology._bonds
     t_out.topology = newtop
-    return t_out, chunks
-
-
-def merge_old(acceptor, donor, alignment, shoulder_width=3,
-          min_ca_displacement=0.1, trim=True):
-    '''
-    Merge two MDTraj trajectories based on a sequence alignment.
-
-    Missing parts of the acceptor trajectory are filled in with
-    parts from the donor trajectory.
-
-    It is assumed that the two trajectories are already structurally
-    aligned.
-
-    '''
-    log = ''
-    matches, mismatches, gaps = aln_score(alignment)
-    if gaps == 0:
-        print('Warning: no gaps detected')
-        return acceptor
-    aln2, aln1 = alignment
-
-    nr = len(aln1)
-    gapinfo = [a for a in aln1]
-    if trim:
-        i = 0
-        while gapinfo[i] == '-':
-            gapinfo[i] = 'x'
-            i += 1
-        i = len(gapinfo) - 1
-        while gapinfo[i] == '-':
-            gapinfo[i] = 'x'
-            i -= 1
-
-    for w in range(1, shoulder_width+1):
-        for i in range(w, nr-w):
-            if gapinfo[i-w] == '-' or gapinfo[i+w] == '-':
-                gapinfo[i] = '?'
-    # gapinfo holds info about shoulder residues and any trimming to be done.
-
-    traj = None
-    j1 = 0
-    j2 = 0
-    for i, r in enumerate(aln1):
-        if r == '-':  # use t2
-            if gapinfo[i] != 'x':
-                log += f'inserting missing residue {donor.topology.residue(j2)}\n'
-                traj = _append(traj, donor, j2)
-            j2 += 1
-        else:
-            if gapinfo[i] == '?':
-                caca = _caca(acceptor, j1, donor, j2)
-                if caca < min_ca_displacement:
-                    # shoulder residue, little deviation, keep acceptor
-                    traj = _append(traj, acceptor, j1)
-                else:
-                    # shoulder residue, use donor
-                    log += f'substituting shoulder residue {donor.topology.residue(j2)}\n'
-                    traj = _append(traj, donor, j2)
-                j2 += 1
-                j1 += 1
-            else:
-                traj = _append(traj, acceptor, j1)
-                j1 += 1
-                if aln2[i] != '-':
-                    j2 += 1
-    newtop = mdt.Topology()
-    cid = newtop.add_chain()
-    for r in traj.topology.residues:
-        rid = newtop.add_residue(r.name, cid)
-        for a in r.atoms:
-            _ = newtop.add_atom(a.name, a.element, rid)
-    newtop._bonds = traj.topology._bonds
-    return mdt.Trajectory(traj.xyz, newtop), log
+    return traj_to_pdb(t_out), chunks
 
 
 def loopfix(acceptor, donor, cutoff=0.02, shoulder_width=3,
@@ -638,7 +525,7 @@ def loopfix(acceptor, donor, cutoff=0.02, shoulder_width=3,
     return fixed_acceptor, chunks
 
 
-def complete(t_in):
+def complete(pdb_in):
     '''
     Complete a structure by adding missing atoms using pdb4amber.
 
@@ -646,7 +533,7 @@ def complete(t_in):
     flips
 
     Args:
-        t_in (MDTrajectory): input structure
+        pdb_in (FileHandle): input structure in PDB format
 
     '''
 
@@ -658,7 +545,7 @@ def complete(t_in):
         )
     pdb4amber.set_inputs(['in.pdb'])
     pdb4amber.set_outputs(['out.pdb'])
-    out = pdb4amber(t_in)
+    out = pdb4amber(pdb_in)
     # Step 2; remove all current hydrogens, then run through reduce, though its
     # only the NQH flips:
     reduce = SubprocessTask(
@@ -681,29 +568,9 @@ def complete(t_in):
     t_out = mdt.load_pdb(out, standard_names=False)
     # Step 4: Remove hydrogens
     t_out = t_out.atom_slice(t_out.topology.select('not element H'))
-    if not isinstance(t_in, mdt.Trajectory):
-        t_in = mdt.load_pdb(t_in, standard_names=False)
-    print(pdb_diff(t_in, t_out))
-    return t_out
-
-
-def h_strip(t_in):
-    '''
-    Strip all hydrogen atoms from a trajectory.
-
-    Args:
-        t_in (MDTrajectory): input trajectory
-
-    Returns:
-        mdt.Trajectory: the stripped trajectory
-
-    '''
-    if not isinstance(t_in, mdt.Trajectory):
-        raise TypeError('Input must be an MDTraj trajectory')
-
-    h_indices = t_in.topology.select('element H')
-    t_out = t_in.atom_slice(np.setdiff1d(np.arange(t_in.n_atoms), h_indices))
-    return t_out
+    pdb_out = traj_to_pdb(t_out)
+    print(pdb_diff(pdb_in, pdb_out))
+    return pdb_out
 
 
 def gapsplit(t_in):
@@ -818,13 +685,14 @@ class Blaster():
         return accessions
 
 
-def search_uniprot_ids(t):
+def search_uniprot_ids(pdb):
     '''
     Search for Unicode accession Id(s) for the provided (protein) trajectory
 
     This approach is generally faster than trying blast
 
     '''
+    t = mdt.load_pdb(pdb)
     # Chop the trajectory sequence into fragments
     t = gapsplit(t)
     ms = t.topology.find_molecules()
@@ -943,10 +811,10 @@ def alpha_get(uniprot_id, session=None):
 
     pdb_url = data[0]['pdbUrl']
     response2 = session.get(pdb_url)
-    with NamedTemporaryFile(suffix='.pdb') as f:
-        f.write(response2.text.encode('utf-8'))
-        t_out = mdt.load_pdb(f.name, standard_names=False)
-    return t_out
+    fh = FileHandler()
+    pdbout = fh.create('tmp.pdb')
+    pdbout.write_text(response2.text.encode('utf-8'))
+    return pdbout
 
 
 def _check_available(cmd):
@@ -975,81 +843,19 @@ def _check_overwrite(path, overwrite):
             raise FileExistsError('Error: {path} already exists')
 
 
-def add_h(t_in, chimera='chimera', mode='amber'):
-    '''
-    Add hydrogen atoms to a structure, using Chimera or ChimeraX
-
-    Args:
-        t_in (MDTrajectory): stucturemissing hydrogens
-        chimera (str): command to invoke Chimera/ChimeraX
-        mode (str): Adjust residue names for chosen software
-                    (only 'amber' is currently supported).
-    '''
-    _check_available(chimera)
-    chimera_version = SubprocessTask(f"{chimera} --version > version")
-    chimera_version.set_outputs(["version"])
-    version = chimera_version.run()
-    if 'ChimeraX' in version.read_text():
-        chimera_type = 'chimerax'
-    else:
-        chimera_type = 'chimera'
-
-    fh = FileHandler()
-    script = fh.create('script')
-    if chimera_type == 'chimerax':
-        script.write_text('open infile.pdb\naddh\nsave outfile.pdb #1\nquit')
-    else:
-        script.write_text('open infile.pdb\naddh\nwrite 0  outfile.pdb\nstop')
-    addh = SubprocessTask(f"{chimera} --nogui < script")
-    addh.set_inputs(['script', 'infile.pdb'])
-    addh.set_outputs(['outfile.pdb'])
-    addh.set_constant('script', script)
-
-    outfile = addh(t_in)
-    if mode == 'amber':
-        _check_available('pdb4amber')
-        pdb4amber = SubprocessTask('pdb4amber -i infile.pdb -o outfile.pdb')
-        pdb4amber.set_inputs(['infile.pdb'])
-        pdb4amber.set_outputs(['outfile.pdb'])
-        amberpdb = pdb4amber(outfile)
-        t_out = mdt.load_pdb(amberpdb, standard_names=False)
-    else:
-        t_out = mdt.load_pdb(outfile, standard_names=False)
-    n_h_in = len(t_in.topology.select('mass < 2.0'))
-    n_h_out = len(t_out.topology.select('mass < 2.0'))
-    n_h_added = n_h_out - n_h_in
-    log = f'fix added {n_h_added} hydrogen atoms'
-    if mode == 'amber':
-        for i, r in enumerate(t_in.topology.residues):
-            r_new = t_out.topology.residue(i)
-            if r.name != r_new.name:
-                log += f'{r.name}{r.resSeq} is now {r_new.name}\n'
-    return t_out, log
-
-
 def alpha_match(prot_in, max_matches=None):
     '''
     Find Alphafold structure for each chain in the supplied protein
     structure file.
 
-    The input can be an MDTraj trajectory, a Crossflow FileHandle, a Path, or a
-    filename (string)
     '''
 
-    if not isinstance(prot_in, (str, Path, mdt.Trajectory, FileHandle)):
-        raise TypeError(f'Unsupported input type {type(prot_in)})')
-
-    if isinstance(prot_in, (str, Path)):
-        _check_exists(prot_in)
-
-    if not isinstance(prot_in, mdt.Trajectory):
-        # Convert to MDTraj trajectory
-        prot_in = mdt.load(prot_in)
+    t_in = mdt.load(prot_in)
     result = {}
 
-    for ic, c in enumerate(prot_in.topology.chains):
+    for ic, c in enumerate(t_in.topology.chains):
         cindx = [a.index for a in c.atoms]
-        tc = prot_in.atom_slice(cindx)
+        tc = t_in.atom_slice(cindx)
         seq = tc.topology.to_fasta()[0]
         if len(seq) > 10:
             try:
@@ -1068,7 +874,7 @@ def alpha_match(prot_in, max_matches=None):
     return result
 
 
-def alpha_loopfix(inpdb, outpdb,
+def alpha_loopfix(inpdb,
                   max_shoulder_size=3,
                   min_ca_displacement=0.1,
                   uniprot_ids=[],
@@ -1076,8 +882,7 @@ def alpha_loopfix(inpdb, outpdb,
     """
     Fix missing residues in a PDB file using AlphaFold.
     Args:
-        inpdb (str): input PDB file name
-        outpdb (str): output PDB file name
+        inpdb (str or FileHandle): input PDB file
         max_shoulder_size (int): maximum size of a loop shoulder
                                  to be replaced by AlphaFold
         min_ca_displacement (float): minimum displacement of the CA
@@ -1088,7 +893,6 @@ def alpha_loopfix(inpdb, outpdb,
                       structure to match the input structure
 
     """
-    _check_exists(inpdb)
 
     if not trim:
         print('Warning: trim=False, the output structure will contain'
@@ -1126,19 +930,21 @@ def alpha_loopfix(inpdb, outpdb,
             t_out = t_out.stack(t_fixed)
     t_out = t_out.stack(tn)
     for i, r in enumerate(t_out.topology.residues):
-        r.resSeq = i + 1  # reset residue numbers
-    t_out.save(outpdb)
-    print(logs)
-    print(f'Fixed structure saved as {outpdb}.')
+        r.resSeq = i + 1   # reset residue numbers
+    for i, a in enumerate(t_out.topology.atoms):
+        a.sequence = i + 1  # reset atom sequence numbers
+    return traj_to_pdb(t_out), logs
 
 
-def pdb_diff(t_before, t_after):
+def pdb_diff(p_before, p_after):
     '''
     Compare two PDB files.
 
     Report differences in residue names, atom names, and coordinates.
 
     '''
+    t_before = mdt.load_pdb(p_before, standard_names=False)
+    t_after = mdt.load_pdb(p_after, standard_names=False)
     report = ''
     for r1, r2 in zip(t_before.topology.residues, t_after.topology.residues):
         if r1.name != r2.name:
@@ -1231,8 +1037,12 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
             parameterize(inpdb, h_name, h_charge, het_dir=het_dir, gaff=gaff,
                          overwrite=overwrite)
 
-    prmtop, inpcrd = leap(inpdb, forcefields, het_names=het_names,
+    try:
+        prmtop, inpcrd, stdout = leap(inpdb, forcefields, het_names=het_names,
                           solvate=solvate, buffer=buffer, het_dir=het_dir)
+    except RuntimeError as e:
+        print(f'Error in leap:\n{e}')
+        exit(1)
     if ion_molarity:
         ttmp = mdt.load(inpcrd, top=prmtop)
         n_waters = len(ttmp.topology.select('name O and resname HOH'))
@@ -1247,18 +1057,18 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
             n_cl = n_ions
         n_na = max(n_na, 0)
         n_cl = max(n_cl, 0)
-        prmtop, inpcrd, stdout = leap(
+        try:
+            prmtop, inpcrd, stdout = leap(
             inpdb, forcefields, het_names=het_names,
             solvate=solvate, buffer=buffer, het_dir=het_dir,
             n_na=n_na, n_cl=n_cl)
-    if prmtop in None or inpcrd is None:
-        print('Error in tleap:')
-        print(stdout)
-    else:
-        prmtop.save(outprmtop)
-        print(f'Parameters written to {outprmtop}')
-        inpcrd.save(outinpcrd)
-        print(f'Coordinates written to {outinpcrd}')
+        except RuntimeError as e:
+            print(f'Error in leap:\n{e}')
+            exit(1)
+    prmtop.save(outprmtop)
+    print(f'Parameters written to {outprmtop}')
+    inpcrd.save(outinpcrd)
+    print(f'Coordinates written to {outinpcrd}')
 
 
 @cache
@@ -1399,6 +1209,8 @@ def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
             for r in het_names:
                 args += [f'{Path(het_dir)}/{r}.mol2', f'{Path(het_dir)}/{r}.frcmod']
     prmtop, inpcrd, stdout = tleap(*args)
+    if prmtop is None or inpcrd is None:
+        raise RuntimeError(f'Error in leap: {stdout}')
     return prmtop, inpcrd, stdout
 
 
@@ -1484,48 +1296,45 @@ def indices_to_mask(indices):
     return mask
 
 
-def rest_min(tin, tref=None, kr=1.0, maxcyc=200):
+def rest_min(pdbin, pdbref=None, kr=1.0, maxcyc=200):
     '''
-    Perform restrained minimization on a trajectory.
+    Perform restrained minimization on a structure.
 
     Use openmm or sander to perform the minimization.
 
     Args:
-        tin (mdt.Trajectory): input trajectory
-        tref (mdt.Trajectory, optional): reference coordinates
+        pdbin (str or FileHandle): input trajectory
+        pdbref (str or FileHandle, optional): reference coordinates
         kr (float): force constant for the restraint (default: 1.0)
         maxcyc (int): maximum number of cycles (default: 200)
 
     Returns:
-        mdt.Trajectory: minimized trajectory
+        FileHandle: minimized structure (PDB format)
     '''
 
     try:
-        t_out, log = rest_min_omm(tin, tref=tref, kr=kr, maxcyc=maxcyc)
+        pdb_out, log = rest_min_omm(pdbin, pdbref=pdbref, kr=kr, maxcyc=maxcyc)
     except ImportError:
-        t_out, log = rest_min_sander(tin, tref=tref, kr=kr, maxcyc=maxcyc)
-    # set chain ids to None so they are automatically set to A,B,C etc.
-    # when the trajectory is saved in PDB format.
-    for c in t_out.topology.chains:
-        c.chain_id = None
-    bumpinfo = bumps(t_out)
+        pdb_out, log = rest_min_sander(pdbin, pdbref=pdbref, kr=kr, maxcyc=maxcyc)
+
+    bumpinfo = bumps(pdb_out)
     if bumpinfo != '':
         print('Warning: close contacts detected in output structure')
-    return t_out, log
+    return pdb_out, log
 
 
-def rest_min_omm(tin, tref=None, kr=1.0, maxcyc=200):
+def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
     '''
     Perform restrained minimization on a trajectory using OpenMM.
 
     Args:
-        tin (mdt.Trajectory): input trajectory
-        tref (mdt.Trajectory, optional): reference coordinates
+        pdbin (str or FileHandle): input trajectory
+        pdbref (str or FileHandle, optional): reference coordinates
         kr (float): force constant for the restraint (default: 1.0)
         maxcyc (int): maximum number of cycles (default: 200)
 
     Returns:
-        mdt.Trajectory: minimized trajectory
+        FileHandle: minimized structure in PDB format
     '''
     from openmm.app import AmberInpcrdFile, AmberPrmtopFile, Simulation
     from openmm import LangevinMiddleIntegrator
@@ -1534,8 +1343,10 @@ def rest_min_omm(tin, tref=None, kr=1.0, maxcyc=200):
     from openmm import CustomExternalForce
     from openmm.unit import kilocalories_per_mole, angstroms
 
-    if tref is None:
-        tref = tin
+    if pdbref is None:
+        pdbref = pdbin
+    tin = mdt.load(pdbin)
+    tref = mdt.load(pdbref)
     if tin.topology != tref.topology:
         raise ValueError('Error: topologies of input and reference structures do not match')
     np = tin.topology.select('not protein')
@@ -1546,13 +1357,10 @@ def rest_min_omm(tin, tref=None, kr=1.0, maxcyc=200):
                 raise ValueError(
                     'Error: input trajectory must contain only protein and water atoms')
 
-    prmtop, inpcrd, stdout = leap(tin, ['protein.ff14SB', 'water.tip3p'])
-    if prmtop is None or inpcrd is None:
-        raise RuntimeError(f'Error in tleap: {stdout}')
-    _, refc, stdout = leap(tref, ['protein.ff14SB', 'water.tip3p'])
-    if prmtop is None or inpcrd is None:
-        raise RuntimeError(f'Error in tleap: {stdout}')
-    pdb = ambpdb(inpcrd, prmtop)
+    prmtop, inpcrd, stdout = leap(pdbin, ['protein.ff14SB', 'water.tip3p'])
+
+    _, refc, stdout = leap(pdbref, ['protein.ff14SB', 'water.tip3p'])
+
     OPRMTOP = AmberPrmtopFile(prmtop)
     OINPCRD = AmberInpcrdFile(inpcrd)
     REFCRD = AmberInpcrdFile(refc)
@@ -1582,34 +1390,38 @@ def rest_min_omm(tin, tref=None, kr=1.0, maxcyc=200):
         getPositions=True).getPositions(asNumpy=True)
 
     # Create a new trajectory with minimized positions
-    tmptop = mdt.load_pdb(pdb, standard_names=False).topology
+    # Remove any extra atoms added by leap in the process
+    apdb = ambpdb(inpcrd, prmtop)
+    tmptop = mdt.load_pdb(apdb, standard_names=False).topology
     tin_ids = [(a.residue.name, a.residue.index, a.name) for a in tin.topology.atoms]
     out_ids = [(a.residue.name, a.residue.index, a.name) for a in tmptop.atoms]
     indx = [out_ids.index(i) for i in tin_ids]
-    
+
     tout = mdt.Trajectory(positions[indx], tin.topology)
     log = f'Restrained minimization performed using OpenMM with force constant {kr} kcal/mol/Å² for {maxcyc} cycles.'
 
-    return tout, log
+    return traj_to_pdb(tout), log
 
 
-def rest_min_sander(tin, tref=None, kr=1.0, maxcyc=200):
+def rest_min_sander(pdbin, pdbref=None, kr=1.0, maxcyc=200):
     '''
     Perform restrained minimization on a trajectory using Sander.
 
     Args:
-        tin (mdt.Trajectory): input trajectory
+        pdbin (path-like): input structure, PDB format
         kr (float): force constant for the restraint (default: 1.0)
         maxcyc (int): maximum number of cycles (default: 200)
 
     Returns:
-        mdt.Trajectory: minimized trajectory
+       FileHandle: minimized structure (PDB format)
     '''
-    if tref is None:
-        tref = tin
+    if pdbref is None:
+        pdbref = pdbin
+    tin = mdt.load_pdb(pdbin)
+    tref = mdt.load_pdb(pdbref)
     if tin.topology != tref.topology:
         raise ValueError('Error: topologies of input and reference structures do not match')
-    
+
     np = tin.topology.select('not protein')
     if len(np) > 0:
         non_standard_residues = set([tin.topology.atom(i).residue.name for i in np])
@@ -1617,10 +1429,10 @@ def rest_min_sander(tin, tref=None, kr=1.0, maxcyc=200):
             if r not in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'HOH']:
                 raise ValueError(
                     'Error: input trajectory must contain only protein and water atoms')
-            
+
     _check_available('sander')
-    prmtop, inpcrd = leap(tin, ['protein.ff14SB', 'water.tip3p'])
-    _, refc = leap(tref, ['protein.ff14SB', 'water.tip3p'])
+    prmtop, inpcrd, stdout = leap(pdbin, ['protein.ff14SB', 'water.tip3p'])
+    _, refc, stdout = leap(tref, ['protein.ff14SB', 'water.tip3p'])
     rmin = SubprocessTask('sander -O -i min.in -o min.out -p prmtop'
                           ' -c in.rst7 -r out.ncrst -ref ref.rst7')
     rmin.set_inputs(['min.in', 'prmtop', 'in.rst7', 'ref.rst7'])
@@ -1653,4 +1465,4 @@ def rest_min_sander(tin, tref=None, kr=1.0, maxcyc=200):
     indx = [out_ids.index(i) for i in tin_ids]
     tout = mdt.load(restart, top=tmptop)
 
-    return tout.atom_slice(indx), log.read_text()
+    return traj_to_pdb(tout.atom_slice(indx)), log.read_text()
