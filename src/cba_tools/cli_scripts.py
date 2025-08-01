@@ -110,7 +110,7 @@ def rest_min_cli():
 
     try:
         pdb_out, log = rest_min(parsed_args.inpdb,
-                                tref=parsed_args.refpdb,
+                                pdbref=parsed_args.refpdb,
                                 maxcyc=parsed_args.maxcyc,
                                 kr=parsed_args.kr)
     except Exception as e:
