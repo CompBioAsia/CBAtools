@@ -88,24 +88,31 @@ import json
 #  Part 1: Various utilities
 
 
-def traj_to_pdb(t):
+def _pdbify(t):
     '''
     Convert an MDTraj trajectory to PDB format
 
     Return as a FileHandle
     '''
+
     fh = FileHandler()
-    tmppdb = fh.create('tmp.pdb')
-    tmppdb.write_text('')  # to sidestep a bug
-    t.save(tmppdb)
-    pdbout = fh.load(tmppdb)
+    if isinstance(t, mdt.Trajectory):
+        tmppdb = fh.create('tmp.pdb')
+        tmppdb.write_text('')  # to sidestep a bug
+        t.save(tmppdb)
+        pdbout = fh.load(tmppdb)
+    elif isinstance(t, (str, Path)):
+        pdbout = fh.load(t)
+    elif isinstance(t, FileHandle):
+        pdbout = t
+    else:
+        raise TypeError(f'Unsupported input type {type(t)}')
     return pdbout
 
 
-def bumps(prot_in, cutoff=0.2):
+def _trajify(prot_in, standard_names=False):
     '''
-    Report close contacts in a protein structure
-
+    Convert input to MDTraj trajectory format
     '''
     if not isinstance(prot_in, (str, Path, mdt.Trajectory, FileHandle)):
         raise TypeError(f'Unsupported input type {type(prot_in)})')
@@ -115,7 +122,40 @@ def bumps(prot_in, cutoff=0.2):
 
     if not isinstance(prot_in, mdt.Trajectory):
         # Convert to MDTraj trajectory
-        prot_in = mdt.load(prot_in)
+        prot_in = mdt.load_pdb(prot_in, standard_names=standard_names)
+    return prot_in
+
+
+def unique_chain_ids(t):
+    '''
+    Return a copy of the trajectory with chain ids set.
+    '''
+    t = _trajify(t)
+    t = mdt.Trajectory(t.xyz.copy(), t.topology.copy())
+    chain_names = [c.chain_id for c in t.topology.chains]
+    if ' '  not in chain_names:
+        return t
+    chain_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    j = 0
+    for i, chain in enumerate(t.topology.chains):
+        if chain.chain_id == ' ':
+            # Assign a new chain id
+            while chain_letters[j] in chain_names:
+                j += 1
+                if j >= len(chain_letters):
+                    print('Warning: too many chains in the trajectory')
+                    return t
+            chain.chain_id = chain_letters[j]
+            chain_names[i] = chain.chain_id
+    return t
+
+
+def bumps(prot_in, cutoff=0.2):
+    '''
+    Report close contacts in a protein structure
+
+    '''
+    prot_in = _trajify(prot_in)
     contacts = []
     for i in range(prot_in.topology.n_residues - 2):
         for j in range(i+2, prot_in.topology.n_residues):
@@ -302,18 +342,34 @@ def aln_score(alignment):
 #          represented as single-snapshot MDTrajectory files
 
 
-def match_align(pdb_in, pdb_ref, cutoff=0.02):
+def match_align(pdb_in, pdb_ref, cutoff=0.02, renumber=False, align=True):
     '''
     Superimpose pdb_in onto pdb_ref, based on sequence alignment
 
     The C-alpha atoms used for least-squares fitting are iteratively pruned
     until all pairs are within cutoff nanometers.
 
+    If renumber is True, the returned PDB file has its residue sequence numbers changed
+    to match those in the reference PDB.
+
+    If align is False, no structure superposition is performed
+
     '''
-    t_in = mdt.load_pdb(pdb_in, standard_names=False)
-    t_ref = mdt.load_pdb(pdb_ref, standard_names=False)
-    alignment = smith_waterman(t_in.topology.to_fasta()[0],
-                               t_ref.topology.to_fasta()[0])
+    t_in = _trajify(pdb_in)
+    t_ref = _trajify(pdb_ref)
+    
+    seq_in = t_in.topology.to_fasta()
+    seq_ref = t_ref.topology.to_fasta()
+    if len(seq_in) != len(seq_ref):
+        raise ValueError('Error: input and reference sequences must have the same number of chains')
+
+    n_chains = len(seq_in)
+    alignment = ["",""]
+    for i in range(n_chains):
+        aln = smith_waterman(seq_in[i], seq_ref[i])
+        alignment[0] += aln[0]
+        alignment[1] += aln[1]
+
     i = -1
     j = -1
     pairs = []
@@ -331,8 +387,18 @@ def match_align(pdb_in, pdb_ref, cutoff=0.02):
             pairs.append(pair)
             pair_pos[pair] = k
         k += 1
-    unconverged = True
+
     t_copy = mdt.Trajectory(t_in.xyz.copy(), t_in.topology.copy())
+    if renumber:
+        for pair in pair_pos:
+            t_copy.topology.atom(pair[0]).residue.resSeq = t_ref.topology.atom(pair[1]).residue.resSeq
+    
+
+    if not align:
+        return _pdbify(t_copy), alignment
+    
+    unconverged = True
+    # Iteratively remove pairs that are too far apart
     while unconverged:
         atom_indices = [p[0] for p in pairs]
         ref_atom_indices = [p[1] for p in pairs]
@@ -360,7 +426,7 @@ def match_align(pdb_in, pdb_ref, cutoff=0.02):
     for p in pairs:
         pairings[pair_pos[p]] = '|'
     alignment = (alignment[0],  ''.join(pairings), alignment[1])
-    return traj_to_pdb(t_out), alignment
+    return _pdbify(t_out), alignment
 
 
 def merge(acceptor, donor, alignment, shoulder_width=3,
@@ -460,8 +526,9 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
     # Now generate the aligned chunks as individual trajectories
     ic = -1
     t_chunks = []
-    t_donor = mdt.load_pdb(donor, standard_names=False)
-    t_acceptor = mdt.load_pdb(acceptor, standard_names=False)
+    t_acceptor = _trajify(acceptor)
+    t_donor = _trajify(donor)
+
     for chunk in chunks:
         if chunk['source'] == 'acceptor':
             i = di[chunk['start']]
@@ -509,7 +576,7 @@ def merge(acceptor, donor, alignment, shoulder_width=3,
             _ = newtop.add_atom(a.name, a.element, rid)
     newtop._bonds = t_out.topology._bonds
     t_out.topology = newtop
-    return traj_to_pdb(t_out), chunks
+    return _pdbify(t_out), chunks
 
 
 def loopfix(acceptor, donor, cutoff=0.02, shoulder_width=3,
@@ -581,7 +648,7 @@ def complete(pdb_in):
     # renumber atoms so conect records are right:
     for i, a in enumerate(t_out.topology.atoms):
         a.serial = i + 1
-    pdb_out = traj_to_pdb(t_out)
+    pdb_out = _pdbify(t_out)
     print(pdb_diff(pdb_in, pdb_out))
     return pdb_out
 
@@ -600,8 +667,7 @@ def gapsplit(t_in):
         mdt.Trajectory: the cleaned trajectory
 
     '''
-    if not isinstance(t_in, mdt.Trajectory):
-        raise TypeError('Input must be an MDTraj trajectory')
+    t_in = _trajify(t_in)
 
     bonds = t_in.topology._bonds
     ibonds = [[b[0].index, b[1].index] for b in bonds]
@@ -691,11 +757,14 @@ class Blaster():
 
         data = response.json()
         alignments = data['Seq_annot']['data']['align']
-        accessions = []
+        matches = []
         for alignment in alignments:
-            accessions.append(alignment['segs']['denseg']['ids'][1][
-                'swissprot']['accession'])
-        return accessions
+            match = {'uniprotAccession': alignment['segs']['denseg']['ids'][1]['swissprot']['accession']}
+            for s in alignment['score']:
+                if s['id']['str'] == "seq_percent_identity":
+                    match['identity'] = s['value']['real']
+            matches.append(match)
+        return matches
 
 
 def search_uniprot_ids(pdb):
@@ -705,7 +774,7 @@ def search_uniprot_ids(pdb):
     This approach is generally faster than trying blast
 
     '''
-    t = mdt.load_pdb(pdb)
+    t = _trajify(pdb)
     # Chop the trajectory sequence into fragments
     t = gapsplit(t)
     ms = t.topology.find_molecules()
@@ -771,24 +840,36 @@ def search_accession(fasta, session=None):
         waiting = status == 'WAITING'
 
     try:
-        accessions = blaster.retrieve(rid)
+        matches = blaster.retrieve(rid)
     except Exception as e:
         print(type(e))
         return
-    return accessions
+    return matches
 
 
-def alpha_search(seq):
+def alpha_search(seq, max_retrys=5):
     '''
     Search the Alphafold database for matches to a given sequence.
     '''
     url = f'https://alphafold.com/search/sequence/{seq}'
-    result = requests.get(url)
+    timed_out = False
+    retry = 0
+    while not timed_out and retry < max_retrys:
+        result = requests.get(url)
+        if result.status_code == 504:
+            retry += 1
+            print('retrying...')
+            sleep(1)
+        else:
+            timed_out = False
+    if timed_out:
+        raise TimeoutError(f'Error: request timed out after {max_retrys} retries')
+    
     soup = BeautifulSoup(result.text, features="html.parser")
-
     jsons = soup.find_all("script", type="application/json")
     if len(jsons) == 0:
         raise ValueError(f'Error: no results found for the sequence {seq}')
+    
     docs = []
     for j in jsons:
         d = json.loads(jsons[0].get_text())
@@ -826,8 +907,19 @@ def alpha_get(uniprot_id, session=None):
     response2 = session.get(pdb_url)
     fh = FileHandler()
     pdbout = fh.create('tmp.pdb')
-    pdbout.write_text(response2.text.encode('utf-8'))
+    pdbout.write_text(response2.text)
     return pdbout
+
+
+def _aliased(cmd):
+    '''
+    Little utility to see if a comand is aliased
+    '''
+    alias = SubprocessTask('alias {cmd}')
+    alias.set_inputs(['cmd'])
+    alias.set_outputs(['STDOUT'])
+    al = alias(cmd)
+    return al
 
 
 def _check_available(cmd):
@@ -836,7 +928,8 @@ def _check_available(cmd):
 
     '''
     if shutil.which(cmd) is None:
-        raise FileNotFoundError(f'Error: cannot find the {cmd} command')
+        if _aliased(cmd) == '':
+            raise FileNotFoundError(f'Error: cannot find the {cmd} command')
 
 
 def _check_exists(filename):
@@ -856,6 +949,158 @@ def _check_overwrite(path, overwrite):
             raise FileExistsError('Error: {path} already exists')
 
 
+def uniprot_diff(prot_pdb, uniprot_id, chain=None):
+    '''
+    Compare a protein structure with a Uniprot entry.
+
+    Args:
+        prot_pdb (str): path to the PDB file of the protein structure
+        uniprot_id (str): Uniprot ID to compare with
+        chain (str): chain ID to compare with, if None, all chains are compared
+
+    Returns:
+        str: report of differences
+
+    '''
+    t_in = _trajify(prot_pdb, standard_names=True)
+    t_uniprot = alpha_get(uniprot_id)
+
+    if chain is not None:
+        t_in = t_in.atom_slice(t_in.topology.select(f'chainid {chain}'))
+
+    _, alignment = match_align(t_uniprot, t_in)
+    log = ''
+    i = 0
+    code = ''
+    for a, p in zip(alignment[0], alignment[2]):
+        if p != '-':
+            if a == p:
+                code += '.'
+            else:
+                code += 'm'
+        else:
+            code += '-'
+
+    seglengths = []
+    sl = 0
+    c = code[0]
+    for i in range(len(code)):
+        if code[i] == c:
+            sl += 1
+        else:
+            seglengths.append(sl)
+            sl = 1
+        c = code[i]
+    seglengths.append(sl)
+
+    i = 0
+    for sl in seglengths:
+        j = i + sl - 1
+        if code[i] == '-':
+            if j > i:
+                log += f"Missing: {alignment[0][i]}{i+1}-{alignment[0][j]}{j+1}\n"
+            else:
+                log += f"Missing: {alignment[0][i]}{i+1}\n"
+        elif code[i] == 'm':
+            for k in range(i, j):
+                log += f"Mutation: {alignment[0][k]}{k+1}->{alignment[2][k]}\n"
+        i += sl
+
+    return log
+
+
+def hetify(pdbin):
+    '''
+    Change ATOM to HETATM for non-protein atoms
+
+    '''
+    t = _trajify(pdbin)
+    non_protein = t.topology.select('not protein')
+    het_residues = set([t.topology.atom(i).residue.name for i in non_protein])
+    in_data = _pdbify(pdbin).read_text().split('\n')
+    out_data = ''
+    for line in in_data:
+        if line[:5] == 'ATOM ':
+            resname = line[17:20]
+            if resname in het_residues:
+                line = 'HETATM' + line[6:]
+        out_data += line + '\n'
+    fh = FileHandler()
+    out_pdb = fh.create('tmp.pdb')
+    out_pdb.write_text(out_data)
+    return out_pdb
+    
+
+def alpha_fix(pdb_in, unicodes, trim=False):
+    '''
+    Complete workflow to remediate a protein PDB file
+
+    '''
+    t_in = _trajify(pdb_in, standard_names=True)
+    t_protein = t_in.atom_slice(t_in.topology.select('protein and mass > 2.0'))
+    t_nonprotein = t_in.atom_slice(t_in.topology.select('not protein'))
+    t_protein = unique_chain_ids(t_protein)
+    n_chains = t_protein.topology.n_chains
+    if n_chains != len(unicodes):
+        raise ValueError(f'Error: there are {n_chains} chains in the PDB file but you supplied {len(unicodes)} uniprot codes.')
+    # Step 1: generate an alphafold based starting structure
+    t_alpha = None
+    log0 = '*** ALPHAFIX V. 0.1 ***\n'
+    for i, chain in enumerate(t_protein.topology.chains):
+        chain_indices = t_protein.topology.select(f"chainid {chain.index}")
+        t_chain = t_protein.atom_slice(chain_indices)
+        alpha = alpha_get(unicodes[i])
+        log0 += f"Comparison of protein chain {chain.chain_id} with uniprot entry {unicodes[i]}:\n"
+        log0 += uniprot_diff(t_chain, unicodes[i]) + "\n"
+        # Align the alphafold structure with the chain:
+        aligned_alpha, aln = match_align(alpha, t_chain)
+        score = aln_score((aln[0], aln[2]))
+        identity = score[0] / t_chain.topology.n_residues
+        if identity < 0.9:
+            print(f"Warning: only {int(identity * 100)}% identity between {unicodes[i]} and chain {i}")
+        istart = 0
+        while aln[2][istart] == '-':
+            istart += 1
+        iend = len(aln[2]) - 1
+        while aln[2][iend] == '-':
+            iend -= 1
+            
+        t_tmp = mdt.load_pdb(aligned_alpha)
+        if trim:
+            sel = t_tmp.topology.select(f"resid {istart} to {iend + 1}")
+        else:
+            sel = t_tmp.topology.select("all")
+        if t_alpha is None:
+            t_alpha = t_tmp.atom_slice(sel)
+        else:
+            t_alpha = t_alpha.stack(t_tmp.atom_slice(sel), keep_resSeq=True)            
+    prot_alpha = _pdbify(t_alpha)
+    # Renumber the original protein to match the alphafold residue numbers:
+    prot_renumbered, aln = match_align(t_protein, t_alpha, renumber=True, align=False)
+    # Energy minimize the aligned alphafold structure with restraints to the original atom positions:
+    opt_alpha_1, log1 = rest_min(_pdbify(t_alpha), prot_renumbered)
+    if bumps(opt_alpha_1) != '':
+        log1 += 'WARNING: Close contacts remain in minimized structure\n'
+    
+    # Replace coordinates in minimized alphafold structure with their exact original values where possible:
+    t_alpha = mdt.load_pdb(opt_alpha_1)
+    t_orig = mdt.load_pdb(prot_renumbered)
+    id_orig = [f"{a.residue.name}{a.residue.resSeq}.{a.residue.chain.chain_id}@{a.name}" for a in t_orig.topology.atoms]
+    id_alpha = [f"{a.residue.name}{a.residue.resSeq}.{a.residue.chain.chain_id}@{a.name}" for a in t_alpha.topology.atoms]
+    for i, a in enumerate(id_orig):
+        if a in id_alpha:
+            j = id_alpha.index(a)
+            t_alpha.xyz[0, j] = t_orig.xyz[0, i]
+            
+    # Second round of restrained energy minimization:
+    opt_alpha_2, log2 = rest_min(_pdbify(t_alpha))
+    if bumps(opt_alpha_2) != '':
+        log2 += 'WARNING: Close contacts remain in minimized structure\n'
+    
+    t_out = _trajify(opt_alpha_2).stack(t_nonprotein)
+    return hetify(t_out), f"{log0}\nOptimisation 1:\n{log1}\nOptimisation 2:\n{log2}"
+
+
 def alpha_match(prot_in, max_matches=None):
     '''
     Find Alphafold structure for each chain in the supplied protein
@@ -863,7 +1108,7 @@ def alpha_match(prot_in, max_matches=None):
 
     '''
 
-    t_in = mdt.load(prot_in)
+    t_in = _trajify(prot_in)
     result = {}
 
     for ic, c in enumerate(t_in.topology.chains):
@@ -911,7 +1156,7 @@ def alpha_loopfix(inpdb,
         print('Warning: trim=False, the output structure will contain'
               ' all residues from the AlphaFold structure(s).')
 
-    t = mdt.load_pdb(inpdb, standard_names=True)
+    t = _trajify(inpdb, standard_names=True)
     tp = t.atom_slice(t.topology.select('protein'))
     tn = t.atom_slice(t.topology.select('not protein'))
     tm = []
@@ -927,9 +1172,10 @@ def alpha_loopfix(inpdb,
     logs = ''
     ioff = 1
     for i, t_alpha in enumerate(tas):
-        t_fixed, chunks = loopfix(tm[i], t_alpha, trim=trim,
+        fixed, chunks = loopfix(tm[i], t_alpha, trim=trim,
                                shoulder_width=max_shoulder_size,
                                min_ca_displacement=min_ca_displacement)
+        t_fixed = mdt.load_pdb(fixed, standard_names=False)
         t_fixed.topology._bonds = []
         logs += f'Chain {i} fixed:\n'
         for chunk in chunks:
@@ -946,7 +1192,7 @@ def alpha_loopfix(inpdb,
         r.resSeq = i + 1   # reset residue numbers
     for i, a in enumerate(t_out.topology.atoms):
         a.serial = i + 1  # reset atom serial numbers
-    return traj_to_pdb(t_out), logs
+    return _pdbify(t_out), logs
 
 
 def pdb_diff(p_before, p_after):
@@ -956,17 +1202,17 @@ def pdb_diff(p_before, p_after):
     Report differences in residue names, atom names, and coordinates.
 
     '''
-    t_before = mdt.load_pdb(p_before, standard_names=False)
-    t_after = mdt.load_pdb(p_after, standard_names=False)
+    t_before = _trajify(p_before, standard_names=False)
+    t_after = _trajify(p_after, standard_names=False)
     report = ''
     for r1, r2 in zip(t_before.topology.residues, t_after.topology.residues):
         if r1.name != r2.name:
-            report += f'{r1.name}{r1.resSeq}: modelled as {r2.name}\n'
+            report += f'{r1.name}{r1.resSeq}.{r1.chain.chain_id}: modelled as {r2.name}\n'
         r1_atoms = [a.name for a in r1.atoms]
         r2_atoms = [a.name for a in r2.atoms]
         added_Heavy_atoms = [a for a in r2_atoms if a not in r1_atoms and a[0] != 'H']
         if added_Heavy_atoms:
-            report += f'{r1.name}{r1.resSeq}: Added heavy atoms: {", ".join(added_Heavy_atoms)}\n'
+            report += f'{r1.name}{r1.resSeq}.{r1.chain.chain_id}: Added heavy atoms: {", ".join(added_Heavy_atoms)}\n'
 
         if r1.name in ('HIS', 'ASN', 'GLN'):
             # Check for NQH flips
@@ -981,7 +1227,7 @@ def pdb_diff(p_before, p_after):
                 a2 = [a.index for a in r2.atoms if a.name == 'OE1']
             if len(a1) > 0 and len(a2) > 0:
                 if not np.allclose(t_before.xyz[0, a1], t_after.xyz[0, a2], atol=0.01):
-                    report += f'{r1.name}{r1.resSeq}: NQH flip\n'
+                    report += f'{r1.name}{r1.resSeq}.{r1.chain.chain_id}: NQH flip\n'
     return report
 
 
@@ -1237,10 +1483,10 @@ def ambpdb(inpcrd, prmtop):
     '''
     _check_available('ambpdb')
 
-    ambpdb = SubprocessTask('ambpdb -p x.prmtop -c x.inpcrd > x.pdb')
-    ambpdb.set_inputs(['x.inpcrd', 'x.prmtop'])
-    ambpdb.set_outputs(['x.pdb'])
-    outpdb = ambpdb(inpcrd, prmtop)
+    _ambpdb = SubprocessTask('ambpdb -p x.prmtop -c x.inpcrd > x.pdb')
+    _ambpdb.set_inputs(['x.inpcrd', 'x.prmtop'])
+    _ambpdb.set_outputs(['x.pdb'])
+    outpdb = _ambpdb(inpcrd, prmtop)
 
     return outpdb
 
@@ -1358,25 +1604,44 @@ def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
 
     if pdbref is None:
         pdbref = pdbin
-    tin = mdt.load_pdb(pdbin, standard_names=False)
-    tref = mdt.load_pdb(pdbref, standard_names=False)
-    if tin.topology != tref.topology:
-        raise ValueError('Error: topologies of input and reference structures do not match')
+    else:
+        pdbref, _ = match_align(pdbref, pdbin)
+    tin = _trajify(pdbin, standard_names=False)
+    tref = _trajify(pdbref, standard_names=False)
+
     np = tin.topology.select('not protein')
+    standard_names = True
     if len(np) > 0:
         non_standard_residues = set([tin.topology.atom(i).residue.name for i in np])
         for r in non_standard_residues:
             if r not in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'HOH']:
                 raise ValueError(
                     'Error: input trajectory must contain only protein and water atoms')
+            else:
+                if r in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH']:
+                    standard_names=False
 
     prmtop, inpcrd, stdout = leap(pdbin, ['protein.ff14SB', 'water.tip3p'])
 
-    _, refc, stdout = leap(pdbref, ['protein.ff14SB', 'water.tip3p'])
+    pdbamber = ambpdb(inpcrd, prmtop)
+    ta = mdt.load_pdb(pdbamber, standard_names=standard_names)
+    for i in range(ta.topology.n_residues):
+        ta.topology.residue(i).resSeq = tin.topology.residue(i).resSeq
+        ta.topology.residue(i).chain.chain_id = tin.topology.residue(i).chain.chain_id
+
+    in_ids = [f"{a.residue.name}{a.residue.resSeq}.{a.residue.chain.chain_id}@{a.name}" for a in tin.topology.atoms]
+    a_ids = [f"{a.residue.name}{a.residue.resSeq}.{a.residue.chain.chain_id}@{a.name}" for a in ta.topology.atoms]
+    ref_ids = [f"{a.residue.name}{a.residue.resSeq}.{a.residue.chain.chain_id}@{a.name}" for a in tref.topology.atoms]
+    extras = False
+    for i in ref_ids:
+        if not i in a_ids:
+            extras = True
+    if extras:
+        print('Warning: reference structure contains atoms not in input structure')
+    ref_inds = [a_ids.index(a) for a in ref_ids if a in a_ids]
 
     OPRMTOP = AmberPrmtopFile(prmtop)
     OINPCRD = AmberInpcrdFile(inpcrd)
-    REFCRD = AmberInpcrdFile(refc)
 
     system = OPRMTOP.createSystem(
         nonbondedMethod=CutoffNonPeriodic,
@@ -1392,28 +1657,32 @@ def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
     force.addPerParticleParameter("x0")
     force.addPerParticleParameter("y0")
     force.addPerParticleParameter("z0")
-    for i, atom in enumerate(OPRMTOP.topology.atoms()):
-        force.addParticle(i, REFCRD.positions[i].value_in_unit(nanometer))
+    for i, j in enumerate(ref_inds):
+        force.addParticle(j, tref.xyz[0,i] * nanometer)
+
     system.addForce(force)
 
     simulation = Simulation(OPRMTOP.topology, system, integrator)
     simulation.context.setPositions(OINPCRD.positions)
+    initial_energy = simulation.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(kilocalories_per_mole)
     simulation.minimizeEnergy(maxIterations=maxcyc)
     positions = simulation.context.getState(
         getPositions=True).getPositions(asNumpy=True)
 
     # Create a new trajectory with minimized positions
     # Remove any extra atoms added by leap in the process
-    apdb = ambpdb(inpcrd, prmtop)
-    tmptop = mdt.load_pdb(apdb, standard_names=False).topology
-    tin_ids = [(a.residue.name, a.residue.index, a.name) for a in tin.topology.atoms]
-    out_ids = [(a.residue.name, a.residue.index, a.name) for a in tmptop.atoms]
-    indx = [out_ids.index(i) for i in tin_ids]
+    
+    indx = [a_ids.index(i) for i in in_ids]
 
     tout = mdt.Trajectory(positions[indx], tin.topology)
-    log = f'Restrained minimization performed using OpenMM with force constant {kr} kcal/mol/Å² for {maxcyc} cycles.'
+    log = 'Restrained minimization performed using OpenMM\n'
+    log += f'force constant: {kr} kcal/mol/Å²\n'
+    log += f'maximum cycles: {maxcyc}\n'
+    log += f'initial energy: {initial_energy:.2f} kcal/mol\n'
+    log += f'final energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(kilocalories_per_mole):.2f} kcal/mol\n'
+    log += f'number of restrained atoms: {len(ref_ids)}\n'
 
-    return traj_to_pdb(tout), log
+    return _pdbify(tout), log
 
 
 def rest_min_sander(pdbin, pdbref=None, kr=1.0, maxcyc=200):
@@ -1430,8 +1699,8 @@ def rest_min_sander(pdbin, pdbref=None, kr=1.0, maxcyc=200):
     '''
     if pdbref is None:
         pdbref = pdbin
-    tin = mdt.load_pdb(pdbin)
-    tref = mdt.load_pdb(pdbref)
+    tin = _trajify(pdbin)
+    tref = _trajify(pdbref)
     if tin.topology != tref.topology:
         raise ValueError('Error: topologies of input and reference structures do not match')
 
@@ -1478,4 +1747,4 @@ def rest_min_sander(pdbin, pdbref=None, kr=1.0, maxcyc=200):
     indx = [out_ids.index(i) for i in tin_ids]
     tout = mdt.load(restart, top=tmptop)
 
-    return traj_to_pdb(tout.atom_slice(indx)), log.read_text()
+    return _pdbify(tout.atom_slice(indx)), log.read_text()

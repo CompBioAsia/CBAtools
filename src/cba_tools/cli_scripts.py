@@ -156,4 +156,4 @@ def alpha_match_cli():
     for chain, matches in result.items():
         print(f"Chain {chain}:")
         for match in matches:
-            print(f" - {match['uniprotAccession']:10s}: {match['identity']}% match")
+            print(f" - {match['uniprotAccession']:10s}: {match['identity']} match")
