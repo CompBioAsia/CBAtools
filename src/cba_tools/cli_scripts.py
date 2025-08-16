@@ -42,7 +42,8 @@ def loopfix_cli():
     parser.add_argument("-o", "--output_file", help="Fixed PDB file.")
     parser.add_argument("-t", "--trim", action="store_true",
                         help="Trim the fixed PDB file to match the input.")
-    parser.add_argument("-w", "--shoulder_width", type=int, default=3, help="Shoulder width for loop fixing.")
+    parser.add_argument("-w", "--shoulder_width", type=int, default=3,
+                        help="Shoulder width for loop fixing.")
     args = parser.parse_args()
 
     if not args.input_file or not args.donor_file or not args.output_file:
@@ -51,14 +52,17 @@ def loopfix_cli():
 
     t_in = mdt.load_pdb(args.input_file, standard_names=False)
     t_donor = mdt.load_pdb(args.donor_file, standard_names=False)
-    fixed, chunks = loopfix(t_in,
-                         t_donor,
-                         trim=args.trim,
-                         shoulder_width=args.shoulder_width)
+    fixed, chunks = loopfix(
+        t_in,
+        t_donor,
+        trim=args.trim,
+        shoulder_width=args.shoulder_width)
 
     fixed.save(args.output_file)
     for chunk in chunks:
-        print(f"residues {chunk['start']} to {chunk['end']} built from {chunk['source']}")
+        msg = f"residues {chunk['start']} to {chunk['end']} "
+        msg += f"built from {chunk['source']}"
+        print(msg)
     print(f"Fixed structure saved as {args.output_file}.")
 
 
@@ -138,12 +142,14 @@ def alpha_loopfix_cli():
     args = parser.parse_args()
 
     alpha_loopfix(args.input_file, args.output_file, trim=args.trim,
-                  uniprot_ids=args.uniprot_ids, max_shoulder_size=args.shoulder_width)
+                  uniprot_ids=args.uniprot_ids,
+                  max_shoulder_size=args.shoulder_width)
 
 
 def alpha_match_cli():
     parser = ArgumentParser(
-        description="Find Alphafold structure for each chain in the supplied protein structure."
+        description="Find Alphafold structure for each chain"
+                    " in the supplied protein structure."
     )
     parser.add_argument("-i", "--input_file",
                         help="Input protein structure file.", required=True)
@@ -156,4 +162,5 @@ def alpha_match_cli():
     for chain, matches in result.items():
         print(f"Chain {chain}:")
         for match in matches:
-            print(f" - {match['uniprotAccession']:10s}: {match['identity']} match")
+            print(f" - {match['uniprotAccession']:10s}:"
+                  f" {match['identity']} match")
