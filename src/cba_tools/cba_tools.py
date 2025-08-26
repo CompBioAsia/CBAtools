@@ -122,7 +122,7 @@ def _trajify(prot_in, standard_names=False):
 
     if not isinstance(prot_in, mdt.Trajectory):
         # Convert to MDTraj trajectory
-        prot_in = mdt.load_pdb(prot_in, standard_names=standard_names)
+        prot_in = mdt.load_pdb(prot_in, standard_names=standard_names, no_boxchk=True)
     return prot_in
 
 
@@ -708,6 +708,31 @@ def gapsplit(t_in):
     t_out = mdt.Trajectory(t_in.xyz, t_in.topology)
     t_out.topology._bonds = good_bonds
     return t_out
+
+
+def sp_search(seq):
+    '''
+    Search swissprot for a sequence using a local installation of blastp
+    
+    '''
+    _check_available('blastp')
+    fh = FileHandler()
+    fasta = fh.create('tmp.fasta')
+    fasta.write_text(f'>query\n{seq}\n')
+    blastp = SubprocessTask('blastp -query x.fasta -db swissprot -out x.csv -outfmt "10 sacc pident" -max_target_seqs 10')
+    blastp.set_inputs(['x.fasta'])
+    blastp.set_outputs(['x.csv'])
+    csvout = blastp(fasta)
+    results = csvout.read_text().strip().split('\n')
+   
+    matches = []
+    for m in results:
+        fields = m.split(',')
+        uac = fields[0]
+        match = {'uniprotAccession': uac}
+        match['percent_identity'] = float(fields[1])
+        matches.append(match)
+    return matches
 
 
 #  Part 3: Web service based tools
@@ -1758,7 +1783,7 @@ def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
     initial_energy = state.getPotentialEnergy().value_in_unit(
         kilocalories_per_mole)
     simulation.minimizeEnergy(maxIterations=maxcyc)
-    state = simulation.context.getState(getEnergy=True)
+    state = simulation.context.getState(getEnergy=True, getPositions=True)
     positions = state.getPositions(asNumpy=True)
     final_energy = state.getPotentialEnergy().value_in_unit(
         kilocalories_per_mole)
