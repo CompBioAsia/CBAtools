@@ -84,6 +84,8 @@ from time import sleep
 from bs4 import BeautifulSoup
 import json
 
+from zmq import has
+
 
 #  Part 1: Various utilities
 
@@ -309,6 +311,13 @@ def smith_waterman(seq1, seq2):
     aligned_seq2 = aligned_seq2[::-1]
 
     #  Add unmatched ends, if any:
+    if max_i > 0 and max_j > 0:
+        n_extra = min(max_i, max_j)
+        aligned_seq1 = seq1[max_i-n_extra:max_i] + aligned_seq1
+        aligned_seq2 = seq2[max_j-n_extra:max_j] + aligned_seq2
+        max_i = max_i - n_extra
+        max_j = max_j - n_extra
+
     if max_i > 0:
         aligned_seq1 = seq1[:max_i] + aligned_seq1
         aligned_seq2 = '-' * max_i + aligned_seq2
@@ -1049,23 +1058,21 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None):
         j = i + sl
         if code[i] == '-':
             if sl > 1:
-                log += f"Missing: {aln[0][i]}{i+1}-{aln[0][j-1]}{j}\n"
+                log += f"  Missing residues: {aln[0][i]}{i+1}-{aln[0][j-1]}{j}\n"
             else:
-                log += f"Missing: {aln[0][i]}{i+1}\n"
+                log += f"  Missing residue: {aln[0][i]}{i+1}\n"
         elif code[i] == 'm':
             for k in range(i, j):
                 ii += 1
-                log += f"Mutation: {aln[0][k]}{k+1}->{aln[2][k]}\n"
+                log += f"  Mutation: {aln[0][k]}{k+1}->{aln[2][k]}\n"
         elif code[i] == '.':
             for k in range(i, j):
                 ii += 1
                 r_in = t_in.topology.residue(ii).name
                 r_uniprot = t_uniprot.topology.residue(k).name
                 if r_in != r_uniprot:
-                    print(log)
-                    print(r_in, r_uniprot)
-                    errmsg_a = f"Error: residue {ii+1} in input PDB does not"
-                    errmsg_b = f" match residue {k+1} in Uniprot"
+                    errmsg_a = f". Error: residue {ii+1} in input PDB does not"
+                    errmsg_b = f"   match residue {k+1} in Uniprot"
                     raise ValueError(errmsg_a + errmsg_b)
                 h_indx = t_in.topology.select(f'resid {ii} and mass > 2.0')
                 h_in = [t_in.topology.atom(h).name for h in h_indx]
@@ -1074,7 +1081,7 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None):
                 msg = [a for a in a_in if a not in h_in]
                 if len(msg) > 0:
                     txt = ', '.join(msg)
-                    log += f"Missing atoms: {aln[0][k]}{k+1}: {txt}\n"
+                    log += f"  Missing atoms: {aln[0][k]}{k+1}: {txt}\n"
         i += sl
 
     return log
@@ -1117,6 +1124,31 @@ def atom_id(a):
     '''
 
     return f"{residue_id(a.residue)}@{a.name}"
+
+
+def alpha_check(pdb_in, unicodes):
+    '''
+    Check the compatibility of a protein PDB file with Uniprot entries.
+
+    '''
+    t_in = _trajify(pdb_in, standard_names=True)
+    t_protein = t_in.atom_slice(t_in.topology.select('protein and mass > 2.0'))
+    t_protein = unique_chain_ids(t_protein)
+    n_chains = t_protein.topology.n_chains
+    if n_chains != len(unicodes):
+        err_a = f'Error: there are {n_chains} chains in the PDB file but'
+        err_b = f' you supplied {len(unicodes)} uniprot codes.'
+        raise ValueError(err_a + err_b)
+    # Step 1: generate an alphafold based starting structure
+    log0 = '*** ALPHACHECK V. 0.1 ***\n'
+    for i, chain in enumerate(t_protein.topology.chains):
+        chain_indices = t_protein.topology.select(f"chainid {chain.index}")
+        t_chain = t_protein.atom_slice(chain_indices)
+        _ = alpha_get(unicodes[i])
+        log0 += f"Comparison of protein chain {chain.chain_id} "
+        log0 += f"with uniprot entry {unicodes[i]}:\n"
+        log0 += uniprot_diff(t_chain, unicodes[i]) + "\n"
+    return log0
 
 
 def alpha_fix(pdb_in, unicodes, trim=False):
@@ -1347,7 +1379,7 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
           forcefields=None,
           solvate=None,
           ion_molarity=None,
-          buffer=10.0):
+          padding=10.0):
     """
     Parameterize a PDB file for AMBER simulations.
 
@@ -1360,7 +1392,7 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
         forcefields (None or list): List of forcefields to use
         solvate (None or str): Solvation option - can be 'box',
                                'cube', or 'oct'.
-        buffer (float): minimum distance from any solute atom
+        padding (float): minimum distance from any solute atom
                         to a periodic box boundary (Angstroms)
 
     """
@@ -1369,6 +1401,19 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
         print('Warning: no forcefields specified, '
               'defaulting to "protein.ff14SB"')
         forcefields = ['protein.ff14SB']
+    has_protein_ff = False
+    for ff in forcefields:
+        if 'protein' in ff:
+            has_protein_ff = True
+    if not has_protein_ff:
+        if 'gaff2' in forcefields:
+            print('Warning: no protein forcefield specified,'
+                  ' defaulting to protein.ff19SB.')
+            forcefields.append('protein.ff19SB')
+        else:
+            print('Warning: no protein forcefield specified,'
+                  ' defaulting to protein.ff14SB.')
+            forcefields.append('protein.ff14SB')
     if solvate:
         if solvate not in ['oct', 'box', 'cube']:
             raise ValueError(f'Error: unrecognised solvate option "{solvate}"')
@@ -1406,7 +1451,7 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
     try:
         prmtop, inpcrd, stdout = leap(
             inpdb, forcefields, het_names=het_names,
-            solvate=solvate, buffer=buffer, het_dir=het_dir)
+            solvate=solvate, padding=padding, het_dir=het_dir)
     except RuntimeError as e:
         print(f'Error in leap:\n{e}')
         exit(1)
@@ -1427,7 +1472,7 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
         try:
             prmtop, inpcrd, stdout = leap(
                 inpdb, forcefields, het_names=het_names,
-                solvate=solvate, buffer=buffer, het_dir=het_dir,
+                solvate=solvate, padding=padding, het_dir=het_dir,
                 n_na=n_na, n_cl=n_cl)
         except RuntimeError as e:
             print(f'Error in leap:\n{e}')
@@ -1518,7 +1563,7 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
     frcmod.save(f'{residue_name}.frcmod')
 
 
-def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
+def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
          n_na=0,
          n_cl=0):
     '''
@@ -1529,7 +1574,7 @@ def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
        ff (list): The force fields to use.
        het_names (list): List of parameterised heterogens
        solvate (str or None): type of periodic box ('box', 'cube', or 'oct')
-       buffer (float): Clearance between solute and any box edge (Angstroms)
+       padding (float): Clearance between solute and any box edge (Angstroms)
        het_dir (str or Path): location of the directory containing heterogen
                               parameters
        n_na (int): number of Na+ ions to add (0 = minimal salt)
@@ -1555,11 +1600,11 @@ def leap(amberpdb, ff, het_names=None, solvate=None, buffer=10.0, het_dir='.',
 
     script += "system = loadpdb system.pdb\n"
     if solvate == "oct":
-        script += f"solvateoct system TIP3PBOX {buffer}\n"
+        script += f"solvateoct system TIP3PBOX {padding}\n"
     elif solvate == "cube":
-        script += f"solvatebox system TIP3PBOX {buffer} iso\n"
+        script += f"solvatebox system TIP3PBOX {padding} iso\n"
     elif solvate == "box":
-        script += f"solvatebox system TIP3PBOX {buffer}\n"
+        script += f"solvatebox system TIP3PBOX {padding}\n"
     if solvate is not None:
         script += f"addions system Na+ {n_na}\naddions system Cl- {n_cl}\n"
     script += "saveamberparm system system.prmtop system.inpcrd\nquit"
@@ -1795,11 +1840,11 @@ def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
 
     tout = mdt.Trajectory(positions[indx], tin.topology)
     log = 'Restrained minimization performed using OpenMM\n'
-    log += f'force constant: {kr} kcal/mol/Å²\n'
-    log += f'maximum cycles: {maxcyc}\n'
-    log += f'initial energy: {initial_energy:.2f} kcal/mol\n'
-    log += f'final energy: {final_energy:.2f} kcal/mol\n'
-    log += f'number of restrained atoms: {len(ref_ids)}\n'
+    log += f'  force constant: {kr} kcal/mol/Å²\n'
+    log += f'  maximum cycles: {maxcyc}\n'
+    log += f'  initial energy: {initial_energy:.2f} kcal/mol\n'
+    log += f'  final energy: {final_energy:.2f} kcal/mol\n'
+    log += f'  number of restrained atoms: {len(ref_ids)}\n'
 
     return _pdbify(tout), log
 

@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
-
 from argparse import ArgumentParser
 import mdtraj as mdt
 from cba_tools.cba_tools import loopfix, param, make_refc, alpha_match, sp_search
-from cba_tools.cba_tools import complete, rest_min, alpha_loopfix, alpha_fix
+from cba_tools.cba_tools import complete, rest_min, alpha_loopfix, alpha_fix, alpha_check
 
 
 def param_cli():
@@ -20,7 +18,7 @@ def param_cli():
                         help='Ligand formal charges')
     parser.add_argument('--solvate', help='Type of water box to use',
                         choices=['box', 'cube', 'oct'])
-    parser.add_argument('--buffer',
+    parser.add_argument('--padding',
                         help='minimum distance of solute atoms from box edge',
                         type=float, default=10.0)
     parser.add_argument('--het_dir', help='Directory for heterogen files',
@@ -100,16 +98,17 @@ def rest_min_cli():
     parser = ArgumentParser(
         description="Perform restrained minimization on a protein PDB file."
     )
-    parser.add_argument('--inpdb', help='Input PDB file', required=True)
-    parser.add_argument('--outpdb', help='Output PDB file',
+    parser.add_argument('-i', '--inpdb', help='Input PDB file', required=True)
+    parser.add_argument('-o', '--outpdb', help='Output PDB file',
                         required=True)
-    parser.add_argument('--refpdb', help='Reference PDB file')
+    parser.add_argument('-r', '--refpdb', help='Reference PDB file')
+    parser.add_argument('-l', '--logfile', help='Log file for minimization output')
+
     parser.add_argument('--maxcyc', type=int, default=200,
                         help='Maximum number of minimization cycles')
     parser.add_argument('--kr', type=float, default=1.0,
                         help='Restraint force constant')
-    parser.add_argument('--logfile', help='Log file for minimization output')
-
+    
     parsed_args = parser.parse_args()
 
     try:
@@ -126,25 +125,47 @@ def rest_min_cli():
             log_file.write(log)
 
 
+def alpha_check_cli():
+    parser = ArgumentParser(
+        description="Check how well a PDB file matches its UniProt sequences.")
+    parser.add_argument("-i", "--inpdb",
+                        help="Input PDB file.", required=True)
+    parser.add_argument("-u", "--uniprot_ids", nargs='*', required=True,
+                        help="List of UniProt IDs for the input structure.")
+    parser.add_argument("-l", "--log", help="Log file for output.")
+
+    args = parser.parse_args()
+    if not args.inpdb:
+        parser.print_help()
+        return
+    log = alpha_check(args.inpdb, args.uniprot_ids)
+    if args.log:
+        with open(args.log, 'w') as log_file:
+            log_file.write(log)
+    else:
+        print(log)
+
+        
 def alpha_fix_cli():
     parser = ArgumentParser(
         description="Fix missing residues in a PDB file using Alphafold.")
-    parser.add_argument("-i", "--input_file",
+    parser.add_argument("-i", "--inpdb",
                         help="Input PDB file.", required=True)
-    parser.add_argument("-o", "--output_file",
+    parser.add_argument("-o", "--outpdb",
                         help="Fixed PDB file.", required=True)
-    parser.add_argument("-t", "--trim", action="store_true",
-                        help="Trim the fixed PDB file to match the input.")
-    parser.add_argument("-u", "--uniprot_ids", nargs='*',
+
+    parser.add_argument("-u", "--uniprot_ids", nargs='*', required=True,
                         help="List of UniProt IDs for the input structure.")
     parser.add_argument("-l", "--log", help="Log file for Alphafold output.")
+    parser.add_argument("-t", "--trim", action="store_true",
+                        help="Trim the fixed PDB file to match the input.")
 
     args = parser.parse_args()
-    if not args.input_file or not args.output_file:
+    if not args.inpdb or not args.outpdb:
         parser.print_help()
         return
-    out_pdb, log = alpha_fix(args.input_file, args.uniprot_ids, trim=args.trim)
-    out_pdb.save(args.output_file)
+    out_pdb, log = alpha_fix(args.inpdb, args.uniprot_ids, trim=args.trim)
+    out_pdb.save(args.outpdb)
     if args.log:
         with open(args.log, 'w') as log_file:
             log_file.write(log)
@@ -189,15 +210,16 @@ def alpha_match_cli():
             print(f" - {match['uniprotAccession']:10s}:"
                   f" {match['identity']} match")
 
+
 def sp_search_cli():
     parser = ArgumentParser(
-        description="Search for small peptides in a protein structure."
+        description="Search for Uniprot matches to a protein structure."
     )
-    parser.add_argument("-i", "--input_file",
+    parser.add_argument("-i", "--inpdb",
                         help="Input protein structure file.", required=True)
     
     args = parser.parse_args()
-    t = mdt.load(args.input_file)
+    t = mdt.load(args.inpdb)
     seqs = t.topology.to_fasta()
     indent = ''
     for i, seq in enumerate(seqs):
