@@ -1,7 +1,25 @@
 from argparse import ArgumentParser
 import mdtraj as mdt
-from cba_tools.cba_tools import loopfix, param, make_refc, alpha_match, sp_search
+from cba_tools.cba_tools import loopfix, param, make_refc, alpha_match, sp_search, parameterize
 from cba_tools.cba_tools import complete, rest_min, alpha_loopfix, alpha_fix, alpha_check
+
+
+def het_param_cli():
+    parser = ArgumentParser(description="Parameterize a heterogen")
+    parser.add_argument('--inpdb', help='Input PDB file', required=True)
+    parser.add_argument('--het_name', help='Names of heterogen residues', required=True)
+    parser.add_argument('--het_charge', type=int, default=0, help='Formal charge of heterogen')
+    parser.add_argument('--forcefield', help='Force field to use', default='gaff',
+                        choices=['gaff', 'gaff2'])
+    parser.add_argument('--het_dir', help='Directory for heterogen files',
+                        default='.')
+    parser.add_argument('--overwrite', default=False, action='store_true',
+                        help='Overwrite existing files')
+    
+    parsed_args = parser.parse_args()
+    parameterize(parsed_args.inpdb, parsed_args.het_name, charge=parsed_args.het_charge,
+                 gaff=parsed_args.forcefield, het_dir=parsed_args.het_dir,
+                 overwrite=parsed_args.overwrite)
 
 
 def param_cli():
@@ -157,14 +175,14 @@ def alpha_fix_cli():
     parser.add_argument("-u", "--uniprot_ids", nargs='*', required=True,
                         help="List of UniProt IDs for the input structure.")
     parser.add_argument("-l", "--log", help="Log file for Alphafold output.")
-    parser.add_argument("-t", "--trim", action="store_true",
-                        help="Trim the fixed PDB file to match the input.")
+    parser.add_argument("-n", "--no_trim", action="store_true",
+                        help="Do not trim the fixed PDB file to match the input.")
 
     args = parser.parse_args()
     if not args.inpdb or not args.outpdb:
         parser.print_help()
         return
-    out_pdb, log = alpha_fix(args.inpdb, args.uniprot_ids, trim=args.trim)
+    out_pdb, log = alpha_fix(args.inpdb, args.uniprot_ids, trim=not args.no_trim)
     out_pdb.save(args.outpdb)
     if args.log:
         with open(args.log, 'w') as log_file:
@@ -213,7 +231,7 @@ def alpha_match_cli():
 
 def sp_search_cli():
     parser = ArgumentParser(
-        description="Search for Uniprot matches to a protein structure."
+        description="Search SwissProt for Uniprot codes matchinga protein structure."
     )
     parser.add_argument("-i", "--inpdb",
                         help="Input protein structure file.", required=True)

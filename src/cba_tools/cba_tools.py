@@ -681,7 +681,7 @@ def complete(pdb_in):
         a.serial = i + 1
     pdb_out = _pdbify(t_out)
     print(pdb_diff(pdb_in, pdb_out))
-    return pdb_out
+    return hetify(pdb_out)
 
 
 def gapsplit(t_in):
@@ -1003,9 +1003,9 @@ def _check_exists(filename):
 def _check_overwrite(path, overwrite):
     if path.exists():
         if overwrite:
-            print('Warning, existing file {path} will be over-written')
+            print(f'Warning, existing file {path} will be over-written')
         else:
-            raise FileExistsError('Error: {path} already exists')
+            raise FileExistsError(f'Error: {path} already exists')
 
 
 def uniprot_diff(prot_pdb, uniprot_id, chain=None):
@@ -1060,11 +1060,11 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None):
             if sl > 1:
                 log += f"  Missing residues: {aln[0][i]}{i+1}-{aln[0][j-1]}{j}\n"
             else:
-                log += f"  Missing residue: {aln[0][i]}{i+1}\n"
+                log += f"  Missing residue:  {aln[0][i]}{i+1}\n"
         elif code[i] == 'm':
             for k in range(i, j):
                 ii += 1
-                log += f"  Mutation: {aln[0][k]}{k+1}->{aln[2][k]}\n"
+                log += f"  Mutation:         {aln[0][k]}{k+1}->{aln[2][k]}\n"
         elif code[i] == '.':
             for k in range(i, j):
                 ii += 1
@@ -1081,7 +1081,7 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None):
                 msg = [a for a in a_in if a not in h_in]
                 if len(msg) > 0:
                     txt = ', '.join(msg)
-                    log += f"  Missing atoms: {aln[0][k]}{k+1}: {txt}\n"
+                    log += f"  Missing atoms:    {aln[0][k]}{k+1}: {txt}\n"
         i += sl
 
     return log
