@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 [project]
 name = "cba_tools"
-version = "0.1.0"
+version = "0.1.1"
 description = "Protein MD Simulation Setup Tools for CompBioAsia."
 readme = "README.md"
 requires-python = ">=3.8"

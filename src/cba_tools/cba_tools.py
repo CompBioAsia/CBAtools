@@ -639,7 +639,7 @@ def alpha_get(uniprot_id, session=None):
     return pdbout
 
 
-def uniprot_diff(prot_pdb, uniprot_id, chain=None):
+def uniprot_diff(prot_pdb, uniprot_id, chain=None, trim=True):
     '''
     Compare a protein structure with a Uniprot entry.
 
@@ -647,6 +647,7 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None):
         prot_pdb (str): path to the PDB file of the protein structure
         uniprot_id (str): Uniprot ID to compare with
         chain (str): chain ID to compare with, if None, all chains are compared
+        trim (bool): whether to note missing residues at N- and C-terminii
 
     Returns:
         str: report of differences
@@ -683,16 +684,21 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None):
         c = code[i]
     seglengths.append(sl)
 
+    n_segs = len(seglengths)
+
     i = 0
     ii = -1
-    for sl in seglengths:
+    for i_seg in range(n_segs):
+        sl = seglengths[i_seg]
         j = i + sl
         if code[i] == '-':
             if sl > 1:
                 log += "  Missing residues: "
-                log += f"{aln[0][i]}{i+1}-{aln[0][j-1]}{j}\n"
-            else:
-                log += f"  Missing residue:  {aln[0][i]}{i+1}\n"
+                log += f"{aln[0][i]}{i+1}-{aln[0][j-1]}{j}"
+                if not trim or (i_seg != 0 and i_seg != n_segs - 1):
+                    log += "\n"
+                else:
+                    log += " (Ignored)\n"
         elif code[i] == 'm':
             for k in range(i, j):
                 ii += 1

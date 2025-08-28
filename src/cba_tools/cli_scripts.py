@@ -1,8 +1,8 @@
 from argparse import ArgumentParser
 import mdtraj as mdt
-from cba_tools.cba_tools import loopfix, param, make_refc, alpha_match
+from cba_tools.cba_tools import param
 from cba_tools.cba_tools import sp_search, parameterize, alpha_check
-from cba_tools.cba_tools import complete, rest_min, alpha_loopfix, alpha_fix
+from cba_tools.cba_tools import complete, rest_min, alpha_fix
 
 
 def het_param_cli():
@@ -51,54 +51,6 @@ def param_cli():
     parsed_args = parser.parse_args()
     # If param expects positional arguments, pass them directly
     result = param(**vars(parsed_args))
-    return result
-
-
-def loopfix_cli():
-    parser = ArgumentParser(description="Fix loops in PDB files.")
-    parser.add_argument("-i", "--input_file", help="Input PDB file.")
-    parser.add_argument("-r", "--donor_file",
-                        help="Donor PDB file for loop fixing.")
-    parser.add_argument("-o", "--output_file", help="Fixed PDB file.")
-    parser.add_argument("-t", "--trim", action="store_true",
-                        help="Trim the fixed PDB file to match the input.")
-    parser.add_argument("-w", "--shoulder_width", type=int, default=3,
-                        help="Shoulder width for loop fixing.")
-    args = parser.parse_args()
-
-    if not args.input_file or not args.donor_file or not args.output_file:
-        parser.print_help()
-        return
-
-    t_in = mdt.load_pdb(args.input_file, standard_names=False)
-    t_donor = mdt.load_pdb(args.donor_file, standard_names=False)
-    fixed, chunks = loopfix(
-        t_in,
-        t_donor,
-        trim=args.trim,
-        shoulder_width=args.shoulder_width)
-
-    fixed.save(args.output_file)
-    for chunk in chunks:
-        msg = f"residues {chunk['start']} to {chunk['end']} "
-        msg += f"built from {chunk['source']}"
-        print(msg)
-    print(f"Fixed structure saved as {args.output_file}.")
-
-
-def make_refc_cli():
-    parser = ArgumentParser(
-        description="Generate reference coordinates for AMBER MD from PDB file"
-    )
-    parser.add_argument('--pdb', help='Input PDB file', required=True)
-    parser.add_argument('--refc', help='Output reference coordinates file',
-                        required=True)
-    parser.add_argument('--inpcrd', help='Input AMBER .inpcrd file',
-                        required=True)
-    parser.add_argument('--prmtop', help='Input AMBER .prmtop file',
-                        required=True)
-    parsed_args = parser.parse_args()
-    result = make_refc(**vars(parsed_args))
     return result
 
 
@@ -194,46 +146,8 @@ def alpha_fix_cli():
     if args.log:
         with open(args.log, 'w') as log_file:
             log_file.write(log)
-
-
-def alpha_loopfix_cli():
-    parser = ArgumentParser(
-        description="Fix missing loops in a PDB file using Alphafold.")
-    parser.add_argument("-i", "--input_file",
-                        help="Input PDB file.", required=True)
-    parser.add_argument("-o", "--output_file",
-                        help="Fixed PDB file.", required=True)
-    parser.add_argument("-t", "--trim", action="store_true",
-                        help="Trim the fixed PDB file to match the input.")
-    parser.add_argument("-u", "--uniprot_ids", nargs='*',
-                        help="List of UniProt IDs for the input structure.")
-    parser.add_argument("-w", "--shoulder_width", type=int, default=3,
-                        help="Shoulder width for loop fixing.")
-    args = parser.parse_args()
-
-    alpha_loopfix(args.input_file, args.output_file, trim=args.trim,
-                  uniprot_ids=args.uniprot_ids,
-                  max_shoulder_size=args.shoulder_width)
-
-
-def alpha_match_cli():
-    parser = ArgumentParser(
-        description="Find Alphafold structure for each chain"
-                    " in the supplied protein structure."
-    )
-    parser.add_argument("-i", "--input_file",
-                        help="Input protein structure file.", required=True)
-    parser.add_argument("-m", "--max_matches", type=int, default=None,
-                        help="Maximum number of matches to return per chain.")
-    args = parser.parse_args()
-
-    result = alpha_match(args.input_file, max_matches=args.max_matches)
-
-    for chain, matches in result.items():
-        print(f"Chain {chain}:")
-        for match in matches:
-            print(f" - {match['uniprotAccession']:10s}:"
-                  f" {match['identity']} match")
+    else:
+        print(log)
 
 
 def sp_search_cli():
