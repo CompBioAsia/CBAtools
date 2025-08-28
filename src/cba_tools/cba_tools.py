@@ -84,8 +84,6 @@ from time import sleep
 from bs4 import BeautifulSoup
 import json
 
-from zmq import has
-
 
 #  Part 1: Various utilities
 
@@ -124,7 +122,8 @@ def _trajify(prot_in, standard_names=False):
 
     if not isinstance(prot_in, mdt.Trajectory):
         # Convert to MDTraj trajectory
-        prot_in = mdt.load_pdb(prot_in, standard_names=standard_names, no_boxchk=True)
+        prot_in = mdt.load_pdb(prot_in, standard_names=standard_names,
+                               no_boxchk=True)
     return prot_in
 
 
@@ -722,18 +721,19 @@ def gapsplit(t_in):
 def sp_search(seq):
     '''
     Search swissprot for a sequence using a local installation of blastp
-    
+
     '''
     _check_available('blastp')
     fh = FileHandler()
     fasta = fh.create('tmp.fasta')
     fasta.write_text(f'>query\n{seq}\n')
-    blastp = SubprocessTask('blastp -query x.fasta -db swissprot -out x.csv -outfmt "10 sacc pident" -max_target_seqs 10')
+    blastp = SubprocessTask('blastp -query x.fasta -db swissprot -out x.csv'
+                            ' -outfmt "10 sacc pident" -max_target_seqs 10')
     blastp.set_inputs(['x.fasta'])
     blastp.set_outputs(['x.csv'])
     csvout = blastp(fasta)
     results = csvout.read_text().strip().split('\n')
-   
+
     matches = []
     for m in results:
         fields = m.split(',')
@@ -1058,7 +1058,8 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None):
         j = i + sl
         if code[i] == '-':
             if sl > 1:
-                log += f"  Missing residues: {aln[0][i]}{i+1}-{aln[0][j-1]}{j}\n"
+                log += "  Missing residues: "
+                log += f"{aln[0][i]}{i+1}-{aln[0][j-1]}{j}\n"
             else:
                 log += f"  Missing residue:  {aln[0][i]}{i+1}\n"
         elif code[i] == 'm':

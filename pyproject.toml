@@ -25,6 +25,8 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 authors = [
     {name = "Charlie Laughton", email = "charles.laughton@nottingham.ac.uk"}
@@ -34,6 +36,7 @@ dependencies = [
     "matplotlib",
     "mdtraj",
     "rdkit",
+    "crossflow"
 ]
 [project.scripts]
 loopfix = "cba_tools.cli_scripts:loopfix_cli"
