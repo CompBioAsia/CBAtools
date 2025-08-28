@@ -1,7 +1,7 @@
 mdtraj
+openmm
 numpy
-rdkit
-openbabel
 crossflow
 shutil
 requests
+crossflow

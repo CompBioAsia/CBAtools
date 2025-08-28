@@ -39,14 +39,11 @@ dependencies = [
     "crossflow"
 ]
 [project.scripts]
-loopfix = "cba_tools.cli_scripts:loopfix_cli"
+sp_search = "cba_tools.cli_scripts:sp_search_cli"
+alpha_check = "cba_tools.cli_scripts:alpha_check_cli"
+alpha_fix = "cba_tools.cli_scripts:alpha_fix_cli"
+prepare_protein = "cba_tools.cli_scripts:prepare_protein_cli"
 param = "cba_tools.cli_scripts:param_cli"
 het_param = "cba_tools.cli_scripts:het_param_cli"
-make_refc = "cba_tools.cli_scripts:make_refc_cli"
-prepare_protein = "cba_tools.cli_scripts:prepare_protein_cli"
 rest_min = "cba_tools.cli_scripts:rest_min_cli"
-alpha_loopfix = "cba_tools.cli_scripts:alpha_loopfix_cli"
-alpha_match = "cba_tools.cli_scripts:alpha_match_cli"
-alpha_fix = "cba_tools.cli_scripts:alpha_fix_cli"
-alpha_check = "cba_tools.cli_scripts:alpha_check_cli"
-sp_search = "cba_tools.cli_scripts:sp_search_cli"
+

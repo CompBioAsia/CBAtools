@@ -6,53 +6,54 @@
 # preparartion of molecular systems for MD simulation.
 # These include:
 #
-#   RDKit
-#   OpenBabel
+# a) Packages that must be installed/available:
+#   Blast
 #   AmberTools
+#
+# b) Python packages that will be automatically installed:
 #   MDTraj
+#   OpenMM
 #
 # The functions are:
 #
-#  smiles_to_pdb : Generates a PDB file for a
-#                  molecule from a SMILES string. Tries
-#                  to be intelligent about protonation
-#                  states of any ionizable groups. Useful
-#                  for ligand preparation. Internally uses
-#                  RDKit and OpenBabel.
+#   sp_search:     Perform a BLAST search of SwissProt to find
+#                  sequences identical (or highly homologous) to
+#                  each chain in the input structure.
+#                  Requires blastp to be available.
 #
-#   param:         A complete AMBER-focussed workflow to
-#                  prepare input files (coordinates and
-#                  parameters) for MD simulation, from
-#                  Complete PDB format files of the solute
-#                  components (e.g. all-atom models of
-#                  protein plus ligand). Includes automatic
-#                  parameterization of non-standard
-#                  residues (using gaff or gaff2), and addition
-#                  of water boxes and neutralizing counterions.
-#                  The tool only works for non-covalent ligands
-#                  (no bonds between the ligand and the protein).
-#                  Internally uses antechamber, parmchk2, and
-#                  tleap.
+#   alpha_check:   Using uniprot ids found from sp_search,
+#                  obtain the corresponding Alphafold structures
+#                  for each chain and list the differences between
+#                  the input structure and the Alphafold structure.
 #
-#   loopfix:       A tool to fix missing residues in a PDB file.
-#                  A user-supplied 'donor' PDB file is used to supply,
-#                  where possible, loop residues missing from the 'acceptor'
-#                  PDB file.
+#   alpha_fix:     Similar to alpha_check, but then use a restrained
+#                  optimization of the alphafold structures to generate
+#                  completed structures for the input, adding missing
+#                  loops and missing heavy atoms.
+#                  Internally uses OpenMM
 #
-#   alpha_loopfix: A tool to fix missing residues in a PDB file
-#                  A suitable 'donor' structure is obtained from
-#                  the Alphafold database and used to
-#                  fill in the missing loop residues.
+#   prepare_protein: Prepare a protein structure for parameterization
+#                  with Amber. This includes fixing residue names
+#                  (e.g HIS to HID/HIE/HIP, CYS to CYX) and adding
+#                  missing heavy atoms.
+#                  Requires pdb4amber and reduce to be available
 #
-#   complete:      A tool to complete a PDB file by adding missing
-#                  atoms (heavy and hydrogen) using pdb4amber.
+#   het_param:     A workflow to parameterize heterogens (e.g. ligands)
+#                  using AmberTools.
+#                  Requires antechamber and parmchk2 to be available.
 #
-#   match_align:   A tool to superimpose two PDB files based on
-#                  their sequence and structure. Similar to the
-#                  Chimera(X) command of the same name.
+#   param:         A complete AMBER-focussed workflow to prepare input
+#                  files (coordinates and topology/forcefield
+#                  parameters) for MD simulation, from complete PDB
+#                  format files of the solute components (e.g. all-atom
+#                  models of protein plus ligand). Includes automatic
+#                  parameterization of non-standard residues (using gaff
+#                  or gaff2) if not already performed using het_param,
+#                  and addition of water boxes and neutralizing counterions.
+#                  The tool only works for non-covalent ligands (no bonds
+#                  between the ligand and the protein).
+#                  Requires antechamber, parmchk2, and tleap to be available.
 #
-#   make_refc:     A tool to generate Amber ".refc" files for restrained
-#                  molecular dynamics simulations.
 #
 #
 # Be aware that all these workflows can be confused by unusual
@@ -65,9 +66,6 @@
 import mdtraj as mdt
 import numpy as np
 
-from rdkit import Chem
-from rdkit.Chem import rdDistGeom
-
 from crossflow.tasks import SubprocessTask, CalledProcessError
 from crossflow.filehandling import FileHandler, FileHandle
 from functools import cache
@@ -75,17 +73,47 @@ from enum import IntEnum
 import shutil
 
 import requests
-from requests import exceptions
-# from conditional_cache import lru_cache
-# from retry_requests import retry
 from pathlib import Path
-from time import sleep
-
-from bs4 import BeautifulSoup
-import json
 
 
 #  Part 1: Various utilities
+
+def _aliased(cmd):
+    '''
+    Little utility to see if a comand is aliased
+    '''
+    alias = SubprocessTask('alias {cmd}')
+    alias.set_inputs(['cmd'])
+    alias.set_outputs(['STDOUT'])
+    al = alias(cmd)
+    return al
+
+
+def _check_available(cmd):
+    '''
+    Little utility to check a required command is available
+
+    '''
+    if shutil.which(cmd) is None:
+        if _aliased(cmd) == '':
+            raise FileNotFoundError(f'Error: cannot find the {cmd} command')
+
+
+def _check_exists(filename):
+    '''
+    Little utility to check if a required file is present
+
+    '''
+    if not Path(filename).exists():
+        raise FileNotFoundError(f'Error: cannot find required file {filename}')
+
+
+def _check_overwrite(path, overwrite):
+    if path.exists():
+        if overwrite:
+            print(f'Warning, existing file {path} will be over-written')
+        else:
+            raise FileExistsError(f'Error: {path} already exists')
 
 
 def _pdbify(prot_in):
@@ -131,6 +159,9 @@ def unique_chain_ids(t):
     '''
     Return a copy of the trajectory with chain ids set.
 
+    Deals with the situation of PDB files with several
+    chains, but no chain ids set.
+
     Chains with existing names (not ' '), are preserved.
     '''
     t = _trajify(t)
@@ -157,6 +188,13 @@ def bumps(prot_in, cutoff=0.2):
     '''
     Report close contacts in a protein structure
 
+    Args:
+        prot_in: The input protein structure (PDB file or MDTraj trajectory)
+        cutoff: Distance cutoff for defining close contacts (default: 0.2 nm)
+
+    Returns:
+        str: A report of close contacts in the protein structure
+
     '''
     prot_in = _trajify(prot_in)
     contacts = []
@@ -176,33 +214,49 @@ def bumps(prot_in, cutoff=0.2):
     return result
 
 
-def smiles_to_pdb(smi, pH=7.0):
+def hetify(pdbin):
     '''
-    Convert an input SMILES representation to a (1 frame) MDTraj trajectory.
+    Change ATOM to HETATM for non-protein atoms
 
-    Args:
-        smi (str): Input SMILES string
-        pH (float): target pH
-
-    Returns:
-        pdb: FileHandle for a PDB file of the molecule
-        charge (int): Formal charge on the molecule.
+    Note: this function doesn't understand nucleic acids.
 
     '''
-    _check_available('obabel')
-    smi_ph = SubprocessTask('echo {smi} | obabel -ismi -osmi -pH {pH}')
-    smi_ph.set_inputs(['smi', 'pH'])
-    smi_ph.set_outputs(['STDOUT'])
-    smi_pH = smi_ph(smi, pH)
-
-    charge = smi_pH.count('+]') - smi_pH.count('-]')
-    mol_pH = Chem.MolFromSmiles(smi_pH)
-    mol_pH_H = Chem.AddHs(mol_pH)
-    rdDistGeom.EmbedMolecule(mol_pH_H)
+    t = _trajify(pdbin)
+    non_protein = t.topology.select('not protein')
+    het_residues = set([t.topology.atom(i).residue.name for i in non_protein])
+    in_data = _pdbify(pdbin).read_text().split('\n')
+    out_data = ''
+    for line in in_data:
+        if line[:5] == 'ATOM ':
+            resname = line[17:20]
+            if resname in het_residues:
+                line = 'HETATM' + line[6:]
+        out_data += line + '\n'
     fh = FileHandler()
-    pdbout = fh.create('tmp.pdb')
-    pdbout.write_text(Chem.MolToPDBBlock(mol_pH_H))
-    return pdbout, charge
+    out_pdb = fh.create('tmp.pdb')
+    out_pdb.write_text(out_data)
+    return out_pdb
+
+
+def residue_id(r):
+    '''
+    Generate a unique identifier string for a residue
+    based on its name, sequence number, and chain ID.
+
+    e.g. ALA12.A
+    '''
+    return f"{r.name}{r.resSeq}.{r.chain.chain_id}"
+
+
+def atom_id(a):
+    '''
+    Generate a unique identifier string for an atom
+    based on its residue and atom name.
+
+    e.g. ALA12.A@CA
+    '''
+
+    return f"{residue_id(a.residue)}@{a.name}"
 
 
 # For the Smith-Waterman code:
@@ -230,6 +284,8 @@ def smith_waterman(seq1, seq2):
        seq1 (str): The first sequence
        seq2 (str): The second sequence
 
+    Returns:
+        tuple: The aligned sequences
     '''
     # Generating the empty matrices for storing scores and tracing
     row = len(seq1) + 1
@@ -338,6 +394,12 @@ def aln_score(alignment):
     Calculate the number of matches, mismatches and gaps
         in a pairwise alignment.
 
+    Args:
+        alignment (tuple): A tuple containing two aligned sequences.
+
+    Returns:
+        tuple: A tuple containing the number of matches, mismatches, and gaps.
+
     '''
     if not len(alignment[0]) == len(alignment[1]):
         raise ValueError('Error: alignments must be the same length')
@@ -363,13 +425,22 @@ def match_align(pdb_in, pdb_ref, cutoff=0.02, renumber=False, align=True):
     Superimpose pdb_in onto pdb_ref, based on sequence alignment
 
     The C-alpha atoms used for least-squares fitting are iteratively pruned
-    until all pairs are within cutoff nanometers.
+    until all pairs are within <cutoff> nanometers.
 
-    If renumber is True, the returned PDB file has its residue sequence
-    numbers changed to match those in the reference PDB.
+    Args:
+        pdb_in: The input PDB file or MDTraj trajectory for the structure
+                to align.
+        pdb_ref: The reference PDB file or MDTraj trajectory for the structure
+                to align to.
+        cutoff: The distance cutoff for defining close contacts
+                (default: 0.02 nm).
+        renumber: If True, the returned PDB file has its residue sequence
+                  numbers changed to match those in the reference PDB.
+        align: If False, no structure superposition is performed (only useful
+               if renumber=True!).
 
-    If align is False, no structure superposition is performed (only useful if
-    renumber=True!)
+   Returns:
+        Filehandle: The path to the aligned PDB file.
 
     '''
     t_in = _trajify(pdb_in)
@@ -450,187 +521,6 @@ def match_align(pdb_in, pdb_ref, cutoff=0.02, renumber=False, align=True):
     return _pdbify(t_out), alignment
 
 
-def merge(acceptor, donor, alignment, shoulder_width=3,
-          min_ca_displacement=0.1, trim=True):
-    '''
-    Merge two PDB files based on a sequence alignment.
-
-    Missing parts of the acceptor PDB are filled in with
-    parts from the donor PDB.
-
-    This version fits each loop individually, using the overlapping
-    shoulder regions to determine the best fit.
-    '''
-
-    matches, mismatches, gaps = aln_score(alignment)
-    if gaps == 0:
-        print('Warning: no gaps detected')
-        return acceptor
-
-    dd = []  # dd will hold the indices of the donor residues
-    i = 0
-    for a in alignment[0]:
-        if a != '-':
-            dd.append(i)
-            i += 1
-        else:
-            dd.append(-1)
-
-    di = []  # di will hold the indices of the acceptor residues
-    i = 0
-    for a in alignment[1]:
-        if a != '-':
-            di.append(i)
-            i += 1
-        else:
-            di.append(-1)
-    # Identify the chunks - contiguous sections to be picked from either
-    # acceptor or donor
-
-    chunk_starts = [0]
-    in_loop = di[0] == -1
-    for i, a in enumerate(di):
-        if in_loop and a != -1:
-            chunk_starts.append(i)
-            in_loop = False
-        elif not in_loop and a == -1:
-            chunk_starts.append(i)
-            in_loop = True
-
-    n_chunks = len(chunk_starts)
-    chunk_ends = []
-    for i in range(1, n_chunks):
-        chunk_ends.append(chunk_starts[i] - 1)
-    chunk_ends.append(len(alignment[1])-1)
-
-    chunks = []
-    for i in range(n_chunks):
-        if di[chunk_starts[i]] == -1:
-            cid = {'source': 'donor',
-                   'start': chunk_starts[i],
-                   'end': chunk_ends[i]}
-        else:
-            cid = {'source': 'acceptor',
-                   'start': chunk_starts[i],
-                   'end': chunk_ends[i]}
-        chunks.append(cid)
-
-    # Adjust if trimming is requested
-    if trim:
-        if chunks[0]['source'] == 'donor':
-            chunks = chunks[1:]
-        if chunks[-1]['source'] == 'donor':
-            chunks = chunks[:-1]
-
-    # Now identify shoulder residues available for fitting
-    shoulders = []
-    for i, chunk in enumerate(chunks):
-        if chunk['source'] == 'donor':
-            # look leftwards...
-            sstart = chunk['start'] - 1
-            valid = sstart > -1
-            swid = 0
-            while valid:
-                swid += 1
-                valid = di[sstart] > -1 and dd[sstart] > -1
-                sstart -= 1
-                valid = (sstart > -1 and
-                         chunk['start'] - sstart <= shoulder_width)
-            shoulders.append(swid)
-
-            # look rightwards...
-            sstart = chunk['end'] + 1
-            valid = sstart < len(di)
-            swid = 0
-            while valid:
-                swid += 1
-                valid = di[sstart] > -1 and dd[sstart] > -1
-                sstart += 1
-                valid = (sstart < len(di) and
-                         sstart - chunk['end'] <= shoulder_width)
-            shoulders.append(swid)
-
-    # Now generate the aligned chunks as individual trajectories
-    ic = -1
-    t_chunks = []
-    t_acceptor = _trajify(acceptor)
-    t_donor = _trajify(donor)
-
-    for chunk in chunks:
-        if chunk['source'] == 'acceptor':
-            i = di[chunk['start']]
-            j = di[chunk['end']]
-            sel = t_acceptor.topology.select(f'resid {i} to {j}')
-            t_chunks.append(t_acceptor.atom_slice(sel))
-
-        elif chunk['source'] == 'donor':
-            ic += 1
-            lr = shoulders[2*ic]
-            rr = shoulders[2*ic + 1]
-            if lr > 0:
-                i_d = dd[chunk['start'] - 1]
-                i_a = di[chunk['start'] - 1]
-                txtd = f'(resid {i_d - lr} to {i_d} and backbone)'
-                txta = f'(resid {i_a - lr} to {i_a} and backbone)'
-            if rr > 0 and lr > 0:
-                txtd += ' or '
-                txta += ' or '
-            if rr > 0:
-                i_d = dd[chunk['end'] + 1]
-                i_a = di[chunk['end'] + 1]
-                txtd = f'(resid {i_d} to {i_d + rr} and backbone)'
-                txta = f'(resid {i_a} to {i_a + rr} and backbone)'
-
-            seld = t_donor.topology.select(txtd)
-            sela = t_acceptor.topology.select(txta)
-            tdd = t_donor.superpose(
-                t_acceptor, atom_indices=seld, ref_atom_indices=sela)
-            i = dd[chunk['start']]
-            j = dd[chunk['end']]
-            sel = tdd.topology.select(f'resid {i} to {j}')
-            t_chunks.append(tdd.atom_slice(sel))
-
-    # Now stack the chunks together
-    t_out = mdt.Trajectory(t_chunks[0].xyz, t_chunks[0].topology)
-    for t in t_chunks[1:]:
-        t_out = t_out.stack(t)
-
-    # Fix the topology:
-    newtop = mdt.Topology()
-    cid = newtop.add_chain()
-    for r in t_out.topology.residues:
-        rid = newtop.add_residue(r.name, cid)
-        for a in r.atoms:
-            _ = newtop.add_atom(a.name, a.element, rid)
-    newtop._bonds = t_out.topology._bonds
-    t_out.topology = newtop
-    return _pdbify(t_out), chunks
-
-
-def loopfix(acceptor, donor, cutoff=0.02, shoulder_width=3,
-            min_ca_displacement=0.1, trim=True):
-    '''
-    remediate acceptor using residues from donor
-
-    Args:
-        acceptor (path-like): PDB file to be remediated
-        donor (path-like): PDB file acting as donor
-        cutoff (float): CA-CA cutoff (nm) for matching pairs
-        shoulder_width (int): max number of 'shoulder' residues to use for
-                              least-squares fitting of loops
-        min_ca_displacement (float): no longer used
-        trim (bool): If True, N- and C-terminii of the donor are not extended
-
-    '''
-    donor_at_acceptor, alignment = match_align(donor, acceptor, cutoff=cutoff)
-    fixed_acceptor, chunks = merge(
-        acceptor, donor_at_acceptor,
-        (alignment[0], alignment[2]),
-        trim=trim, shoulder_width=shoulder_width,
-        min_ca_displacement=min_ca_displacement)
-    return fixed_acceptor, chunks
-
-
 def complete(pdb_in):
     '''
     Complete a structure by adding missing atoms using pdb4amber.
@@ -640,6 +530,9 @@ def complete(pdb_in):
 
     Args:
         pdb_in (path-like): input structure in PDB format
+
+    Returns:
+        Filehandle: The path to the completed PDB file.
 
     '''
 
@@ -683,44 +576,16 @@ def complete(pdb_in):
     return hetify(pdb_out)
 
 
-def gapsplit(t_in):
-    '''
-    Remove bogus peptide bonds from a trajectory.
-
-    MDTraj will bond consecutive amino acids even if there is
-    a gap between them. This function removes such bonds.
-
-    Args:
-        trajin (mdt.Trajectory): input trajectory
-
-    Returns:
-        mdt.Trajectory: the cleaned trajectory
-
-    '''
-    t_in = _trajify(t_in)
-
-    bonds = t_in.topology._bonds
-    ibonds = [[b[0].index, b[1].index] for b in bonds]
-    bls = mdt.compute_distances(t_in, ibonds)[0]
-
-    good_bonds = []
-    for i, bl in enumerate(bls):
-        bond_id = bonds[i][0].name + bonds[i][1].name
-        if bond_id == 'CN' or bond_id == 'NC':
-            # This is a peptide bond, check if it is bogus
-            if bl < 0.3:
-                # This is an OK bond, keep it
-                good_bonds.append(bonds[i])
-        else:
-            good_bonds.append(bonds[i])
-    t_out = mdt.Trajectory(t_in.xyz, t_in.topology)
-    t_out.topology._bonds = good_bonds
-    return t_out
-
-
 def sp_search(seq):
     '''
     Search swissprot for a sequence using a local installation of blastp
+
+    Args:
+        seq (str): The query sequence to search for.
+
+    Returns:
+        list: A list of dictionaries with Uniprot codes of matching sequences
+            in SwissProtand their % sequence identities.
 
     '''
     _check_available('blastp')
@@ -744,214 +609,18 @@ def sp_search(seq):
     return matches
 
 
-#  Part 3: Web service based tools
-
-class Blaster():
-    def __init__(self, session=None):
-        if not session:
-            #  self.session = retry(requests.Session(), retries=5,
-            #                      backoff_factor=0.2)
-            self.session = requests.Session()
-        else:
-            self.session = session
-        self.url_base = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi'
-
-    def submit(self, fasta):
-        '''
-        Submit a Blast job to find the Uniprot IDs
-        of the best matches to a sequence
-
-        '''
-        params = {
-            'CMD': 'Put',
-            'QUERY': fasta,
-            'DATABASE': 'swissprot',
-            'PROGRAM': 'blastp',
-            'HITLIST_SIZE': 3,
-            'ALIGNMENTS': 3
-        }
-        try:
-            response = self.session.get(self.url_base, params=params)
-        except exceptions.ConnectionError:
-            raise exceptions.ConnectionError("Error: can't reach Blast server")
-
-        content = response.text.split('\n')
-
-        for c in content:
-            if 'RID =' in c:
-                rid = c.split()[2]
-
-        content = response.text.split('\n')
-        for c in content:
-            if 'estimate' in c:
-                delay = int(c.split()[8])
-        return rid, delay
-
-    def status(self, rid):
-        '''
-        Check the status of a job
-
-        '''
-        response = self.session.get(self.url_base,
-                                    params={'CMD': 'Get', 'RID': rid})
-        if 'Status=' in response.text:
-            ioff = response.text.index('Status=')
-            text = response.text[ioff+7:ioff+17].split()[0]
-            return text
-        else:
-            return 'UNKNOWN'
-
-    def retrieve(self, rid):
-        '''
-        Retrieve the results of a job
-
-        '''
-        response = self.session.get(self.url_base,
-                                    params={'CMD': 'Get',
-                                            'RID': rid,
-                                            'FORMAT_TYPE': 'JSONSA'})
-
-        data = response.json()
-        alignments = data['Seq_annot']['data']['align']
-        matches = []
-        for alignment in alignments:
-            uac = alignment['segs']['denseg']['ids'][1]['swissprot']
-            match = {'uniprotAccession': uac['accession']}
-            for s in alignment['score']:
-                if s['id']['str'] == "seq_percent_identity":
-                    match['identity'] = s['value']['real']
-            matches.append(match)
-        return matches
-
-
-def search_uniprot_ids(pdb):
-    '''
-    Search for Unicode accession Id(s) for the provided (protein) trajectory
-
-    This approach is generally faster than trying blast
-
-    '''
-    t = _trajify(pdb)
-    # Chop the trajectory sequence into fragments
-    t = gapsplit(t)
-    ms = t.topology.find_molecules()
-    frag_len = 20
-    frag_min = 3
-
-    frags = []
-    for m in ms:
-        indx = sorted([a.index for a in m])
-        seq = t.topology.subset(indx).to_fasta()[0]
-        frgs = [seq[i:i+frag_len] for i in range(0, len(seq), frag_len)]
-        for f in frgs:
-            if len(f) > frag_min:
-                frags.append(f)
-
-    # The Uniprot peptide search API:
-    endpoint = 'https://peptidesearch.uniprot.org/asyncrest/'
-
-    # 1. Submit:
-    data = {'peps': frags,
-            'lEQi': 'off',
-            'spOnly': 'on'
-            }
-    response = requests.post(endpoint, data=data)
-    if response.status_code == 202:
-        loc_url = response.headers['Location']
-    else:
-        raise Exception('Request not accepted')
-
-    # 2. Poll for completion:
-    status_code = 303
-    max_polls = 10
-    i_poll = 1
-    while status_code == 303 and i_poll < max_polls:
-        sleep(5)
-        response = requests.get(loc_url)
-        status_code = response.status_code
-        i_poll += 1
-
-    # 3. Get results:
-    if status_code == 303:
-        raise Exception('Error: request timed out')
-    elif status_code != 200:
-        raise Exception(f'Error: {response}')
-    uids = [u for u in response.text.split(',') if '-' not in u]
-    return uids
-
-
-#  @lru_cache(condition=lambda result: result is not None)
-def search_accession(fasta, session=None):
-    '''
-    See if you can find a Uniprot accession Id for the sequence in traj
-
-    This version uses the NCBI Blast service, which can be slow...
-    '''
-    blaster = Blaster(session=session)
-    rid, delay = blaster.submit(fasta)
-    waiting = True
-    while waiting:
-        print('waiting...')
-        sleep(delay)
-        status = blaster.status(rid)
-        waiting = status == 'WAITING'
-
-    try:
-        matches = blaster.retrieve(rid)
-    except Exception as e:
-        print(type(e))
-        return
-    return matches
-
-
-def alpha_search(seq, max_retrys=5):
-    '''
-    Search the Alphafold database for matches to a given sequence.
-    '''
-    url = f'https://alphafold.com/search/sequence/{seq}'
-    timed_out = False
-    retry = 0
-    while not timed_out and retry < max_retrys:
-        result = requests.get(url)
-        if result.status_code == 504:
-            retry += 1
-            print('retrying...')
-            sleep(1)
-        else:
-            timed_out = False
-    if timed_out:
-        raise TimeoutError(
-            f'Error: request timed out after {max_retrys} retries')
-
-    soup = BeautifulSoup(result.text, features="html.parser")
-    jsons = soup.find_all("script", type="application/json")
-    if len(jsons) == 0:
-        raise ValueError(f'Error: no results found for the sequence {seq}')
-
-    docs = []
-    for j in jsons:
-        d = json.loads(jsons[0].get_text())
-        for k in d.keys():
-            if k != '__nghData__' and 'docs' in d[k]['b']:
-                docs += d[k]['b']['docs']
-
-    matches = []
-    for d in docs:
-        identity = [v['value'] for v in d['sequenceData']['sequence_stats']
-                    if v['label'] == 'Identity'][0]
-        match = {
-            'entryId': d['entryId'],
-            'uniprotAccession': d['uniprotAccession'],
-            'identity': identity
-        }
-        matches.append(match)
-    return matches
-
-
 def alpha_get(uniprot_id, session=None):
     '''
     Get the Alphafold structure with the given Uniprot Id
     If it exists
+
+    Args:
+        uniprot_id (str): The Uniprot ID to retrieve the structure for.
+        session (requests.Session, optional): A requests session to use for
+                                              the API call.
+
+    Returns:
+        FileHandle: A file handle for the downloaded PDB file.
     '''
     if not session:
         #  session = retry(requests.Session(), retries=5, backoff_factor=0.2)
@@ -968,44 +637,6 @@ def alpha_get(uniprot_id, session=None):
     pdbout = fh.create('tmp.pdb')
     pdbout.write_text(response2.text)
     return pdbout
-
-
-def _aliased(cmd):
-    '''
-    Little utility to see if a comand is aliased
-    '''
-    alias = SubprocessTask('alias {cmd}')
-    alias.set_inputs(['cmd'])
-    alias.set_outputs(['STDOUT'])
-    al = alias(cmd)
-    return al
-
-
-def _check_available(cmd):
-    '''
-    Little utility to check a required command is available
-
-    '''
-    if shutil.which(cmd) is None:
-        if _aliased(cmd) == '':
-            raise FileNotFoundError(f'Error: cannot find the {cmd} command')
-
-
-def _check_exists(filename):
-    '''
-    Little utility to check if a required file is present
-
-    '''
-    if not Path(filename).exists():
-        raise FileNotFoundError(f'Error: cannot find required file {filename}')
-
-
-def _check_overwrite(path, overwrite):
-    if path.exists():
-        if overwrite:
-            print(f'Warning, existing file {path} will be over-written')
-        else:
-            raise FileExistsError(f'Error: {path} already exists')
 
 
 def uniprot_diff(prot_pdb, uniprot_id, chain=None):
@@ -1088,48 +719,17 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None):
     return log
 
 
-def hetify(pdbin):
-    '''
-    Change ATOM to HETATM for non-protein atoms
-
-    '''
-    t = _trajify(pdbin)
-    non_protein = t.topology.select('not protein')
-    het_residues = set([t.topology.atom(i).residue.name for i in non_protein])
-    in_data = _pdbify(pdbin).read_text().split('\n')
-    out_data = ''
-    for line in in_data:
-        if line[:5] == 'ATOM ':
-            resname = line[17:20]
-            if resname in het_residues:
-                line = 'HETATM' + line[6:]
-        out_data += line + '\n'
-    fh = FileHandler()
-    out_pdb = fh.create('tmp.pdb')
-    out_pdb.write_text(out_data)
-    return out_pdb
-
-
-def residue_id(r):
-    '''
-    Generate a unique identifier for a residue
-    based on its name, sequence number, and chain ID.
-    '''
-    return f"{r.name}{r.resSeq}.{r.chain.chain_id}"
-
-
-def atom_id(a):
-    '''
-    Generate a unique identifier for an atom
-    based on its residue and atom name.
-    '''
-
-    return f"{residue_id(a.residue)}@{a.name}"
-
-
 def alpha_check(pdb_in, unicodes):
     '''
     Check the compatibility of a protein PDB file with Uniprot entries.
+
+    Args:
+        pdb_in (str): Path to the input PDB file.
+        unicodes (list): List of Uniprot IDs to check against
+                         (one for each protein chain)
+
+    Returns:
+        str: A report of the compatibility check.
 
     '''
     t_in = _trajify(pdb_in, standard_names=True)
@@ -1155,6 +755,17 @@ def alpha_check(pdb_in, unicodes):
 def alpha_fix(pdb_in, unicodes, trim=False):
     '''
     Complete workflow to remediate a protein PDB file
+
+    Args:
+        pdb_in (str): Path to the input PDB file.
+        unicodes (list): List of Uniprot IDs to check against
+                         (one for each protein chain)
+        trim (bool): If True, trim the Alphafold structures to match
+                     the input structure. Default is False.
+
+    Returns:
+        (Filehandle, str): A filehandle for the remediated structure
+                           and a report of the fixing process.
 
     '''
     t_in = _trajify(pdb_in, standard_names=True)
@@ -1234,107 +845,18 @@ def alpha_fix(pdb_in, unicodes, trim=False):
     return hetify(t_out), log
 
 
-def alpha_match(prot_in, max_matches=None):
-    '''
-    Find Alphafold structure for each chain in the supplied protein
-    structure file.
-
-    '''
-
-    t_in = _trajify(prot_in)
-    result = {}
-
-    for ic, c in enumerate(t_in.topology.chains):
-        cindx = [a.index for a in c.atoms]
-        tc = t_in.atom_slice(cindx)
-        seq = tc.topology.to_fasta()[0]
-        if len(seq) > 10:
-            try:
-                matches = alpha_search(seq)
-            except ValueError as e:
-                print(f'Error searching for chain {ic}: {e}')
-                continue
-            n_matches = len(matches)
-            if n_matches == 0:
-                print(f'No matches found for chain {ic}')
-                continue
-
-            if max_matches is not None:
-                n_matches = min(n_matches, max_matches)
-            result[ic] = matches[:n_matches]
-    return result
-
-
-def alpha_loopfix(inpdb,
-                  max_shoulder_size=3,
-                  min_ca_displacement=0.1,
-                  uniprot_ids=[],
-                  trim=True):
-    """
-    Fix missing residues in a PDB file using AlphaFold.
-    Args:
-        inpdb (str or FileHandle): input PDB file
-        max_shoulder_size (int): maximum size of a loop shoulder
-                                 to be replaced by AlphaFold
-        min_ca_displacement (float): minimum displacement of the CA
-                                     atom from the original structure
-                                     to be replaced by AlphaFold
-        uniprot_ids (list): list of UniProt IDs for the input structure
-        trim (bool): whether to trim the AlphaFold
-                      structure to match the input structure
-
-    """
-
-    if not trim:
-        print('Warning: trim=False, the output structure will contain'
-              ' all residues from the AlphaFold structure(s).')
-
-    t = _trajify(inpdb, standard_names=True)
-    tp = t.atom_slice(t.topology.select('protein'))
-    tn = t.atom_slice(t.topology.select('not protein'))
-    tm = []
-    for m in tp.topology.find_molecules():
-        aindx = sorted([a.index for a in m])
-        tm.append(tp.atom_slice(aindx))
-    if len(tm) != len(uniprot_ids):
-        raise ValueError('Error: number of UniProt IDs does not match'
-                         ' the number of protein chains in the input'
-                         ' structure')
-    tas = [alpha_get(i) for i in uniprot_ids]
-
-    t_out = None
-    logs = ''
-    ioff = 1
-    for i, t_alpha in enumerate(tas):
-        fixed, chunks = loopfix(tm[i], t_alpha, trim=trim,
-                                shoulder_width=max_shoulder_size,
-                                min_ca_displacement=min_ca_displacement)
-        t_fixed = mdt.load_pdb(fixed, standard_names=False)
-        t_fixed.topology._bonds = []
-        logs += f'Chain {i} fixed:\n'
-        for chunk in chunks:
-            chunk_length = (chunk['end'] - chunk['start']) + 1
-            if chunk['source'] == 'donor':
-                logs += f" - residues {ioff} to {ioff + chunk_length - 1}"
-                logs += f" built from {uniprot_ids[i]}\n"
-            ioff += chunk_length
-        if t_out is None:
-            t_out = t_fixed
-        else:
-            t_out = t_out.stack(t_fixed)
-    t_out = t_out.stack(tn)
-    for i, r in enumerate(t_out.topology.residues):
-        r.resSeq = i + 1   # reset residue numbers
-    for i, a in enumerate(t_out.topology.atoms):
-        a.serial = i + 1  # reset atom serial numbers
-    return _pdbify(t_out), logs
-
-
 def pdb_diff(p_before, p_after):
     '''
     Compare two PDB files.
 
     Report differences in residue names, atom names, and coordinates.
+
+    Args:
+        p_before (str): Path to the PDB file before modification.
+        p_after (str): Path to the PDB file after modification.
+
+    Returns:
+        str: A report of the differences between the two PDB files.
 
     '''
     t_before = _trajify(p_before, standard_names=False)
@@ -1581,6 +1103,10 @@ def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
        n_na (int): number of Na+ ions to add (0 = minimal salt)
        n_cl (int): number of Cl- ions to add (0 = minimal salt)
 
+    Returns:
+         (FileHandle, FileHandle, str): prmtop file, inpcrd file,
+                                        tleap log text
+
     '''
     _check_available('tleap')
     inputs = ['script', 'system.pdb']
@@ -1646,43 +1172,6 @@ def ambpdb(inpcrd, prmtop):
     return outpdb
 
 
-def make_refc(pdb, inpcrd, prmtop, refc):
-    '''
-    Make a reference coordinate file for an Amber simulation.
-
-    Args:
-        pdb (path-like): input PDB file name
-        inpcrd (path-like): input inpcrd file name
-        prmtop (path-like): input prmtop file name
-        refc (path-like): output reference coordinate file name
-
-    '''
-    _check_exists(pdb)
-    _check_exists(inpcrd)
-    _check_exists(prmtop)
-
-    tr = mdt.load_pdb(pdb, standard_names=True)
-    ti = mdt.load(inpcrd, top=prmtop)
-    n_ref = tr.topology.n_atoms
-    n_inp = ti.topology.n_atoms
-    if n_ref > n_inp:
-        raise ValueError(f'Error: number of atoms in {pdb} ({n_ref}) '
-                         f'exceeds the number of atoms in {inpcrd} ({n_inp})')
-    tir = ti.atom_slice(np.arange(n_ref))
-    # Check if the topologies match, at least by atom names:
-    for i in range(tir.topology.n_atoms):
-        if tir.topology.atom(i).name != tr.topology.atom(i).name:
-            raise ValueError(f'Error: atom {i} names do not match '
-                             f'({tir.topology.atom(i).name} in {inpcrd}, '
-                             f'{tr.topology.atom(i).name} in {pdb})')
-    # Superpose the input coordinates to the reference coordinates
-    tr = tr.superpose(tir)
-
-    ti.xyz[0, :n_ref] = tr.xyz[0, :n_ref]
-    ti.save(refc)
-    print(f'Reference coordinates saved as {refc}.')
-
-
 def indices_to_mask(indices):
     '''
     Convert a list of atom indices into an Amber-style atom mask
@@ -1723,7 +1212,7 @@ def rest_min(pdbin, pdbref=None, kr=1.0, maxcyc=200):
         maxcyc (int): maximum number of cycles (default: 200)
 
     Returns:
-        FileHandle: minimized structure (PDB format)
+        (FileHandle, str): minimized structure (PDB format), and log
     '''
 
     try:
@@ -1749,7 +1238,7 @@ def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
         maxcyc (int): maximum number of cycles (default: 200)
 
     Returns:
-        FileHandle: minimized structure in PDB format
+        (FileHandle, str): minimized structure in PDB format, and log
     '''
     from openmm.app import AmberInpcrdFile, AmberPrmtopFile, Simulation
     from openmm import LangevinMiddleIntegrator
