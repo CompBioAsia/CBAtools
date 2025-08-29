@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 import mdtraj as mdt
+from cba_tools._version import __version__
 from cba_tools.cba_tools import param
 from cba_tools.cba_tools import sp_search, parameterize, alpha_check
 from cba_tools.cba_tools import complete, rest_min, alpha_fix
@@ -18,6 +19,7 @@ def het_param_cli():
                         default='.')
     parser.add_argument('--overwrite', default=False, action='store_true',
                         help='Overwrite existing files')
+    parser.add_argument('--version', action='version', version=__version__)
 
     parsed_args = parser.parse_args()
     parameterize(parsed_args.inpdb, parsed_args.het_name,
@@ -47,6 +49,7 @@ def param_cli():
                         default='.')
     parser.add_argument('--ion_molarity', type=float,
                         help='Target ionic strength (M)')
+    parser.add_argument('--version', action='version', version=__version__)
 
     parsed_args = parser.parse_args()
     # If param expects positional arguments, pass them directly
@@ -83,6 +86,7 @@ def rest_min_cli():
                         help='Maximum number of minimization cycles')
     parser.add_argument('--kr', type=float, default=1.0,
                         help='Restraint force constant')
+    parser.add_argument('--version', action='version', version=__version__)
 
     parsed_args = parser.parse_args()
 
@@ -108,6 +112,7 @@ def alpha_check_cli():
     parser.add_argument("-u", "--uniprot_ids", nargs='*', required=True,
                         help="List of UniProt IDs for the input structure.")
     parser.add_argument("-l", "--log", help="Log file for output.")
+    parser.add_argument("--version", action="version", version=__version__)
 
     args = parser.parse_args()
     if not args.inpdb:
@@ -135,6 +140,7 @@ def alpha_fix_cli():
     parser.add_argument("-n", "--no_trim", action="store_true",
                         help="Don't trim the fixed PDB file"
                         " to match the input.")
+    parser.add_argument("--version", action="version", version=__version__)
 
     args = parser.parse_args()
     if not args.inpdb or not args.outpdb:
@@ -157,6 +163,7 @@ def sp_search_cli():
     )
     parser.add_argument("-i", "--inpdb",
                         help="Input protein structure file.", required=True)
+    parser.add_argument("--version", action="version", version=__version__)
 
     args = parser.parse_args()
     t = mdt.load(args.inpdb)
