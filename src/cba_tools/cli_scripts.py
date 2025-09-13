@@ -163,6 +163,8 @@ def sp_search_cli():
     )
     parser.add_argument("-i", "--inpdb",
                         help="Input protein structure file.", required=True)
+    parser.add_argument("-m", "--max_hits", type=int, default=1,
+                        help="Maximum number of hits to return per chain.")
     parser.add_argument("--version", action="version", version=__version__)
 
     args = parser.parse_args()
@@ -180,7 +182,7 @@ def sp_search_cli():
             print(f"{indent}Skipping short ({len(seq)} residue chain.")
             continue
         result = sp_search(seq)
-        for match in result:
+        for match in result[:args.max_hits]:
             uid = match['uniprotAccession']
             pid = float(match['percent_identity'])
             print(f"{indent}{uid} {pid:3.1f} %")
