@@ -42,6 +42,7 @@ dependencies = [
 sp_search = "cba_tools.cli_scripts:sp_search_cli"
 alpha_check = "cba_tools.cli_scripts:alpha_check_cli"
 alpha_fix = "cba_tools.cli_scripts:alpha_fix_cli"
+alpha_get = "cba_tools.cli_scripts:alpha_get_cli"
 prepare_protein = "cba_tools.cli_scripts:prepare_protein_cli"
 param = "cba_tools.cli_scripts:param_cli"
 het_param = "cba_tools.cli_scripts:het_param_cli"

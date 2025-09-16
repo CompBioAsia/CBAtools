@@ -3,7 +3,7 @@ import mdtraj as mdt
 from cba_tools._version import __version__
 from cba_tools.cba_tools import param
 from cba_tools.cba_tools import sp_search, parameterize, alpha_check
-from cba_tools.cba_tools import complete, rest_min, alpha_fix
+from cba_tools.cba_tools import complete, rest_min, alpha_fix, alpha_get
 
 
 def het_param_cli():
@@ -124,6 +124,23 @@ def alpha_check_cli():
             log_file.write(log)
     else:
         print(log)
+
+
+def alpha_get_cli():
+    parser = ArgumentParser(
+        description="Get Alphafold model for a UniProt IDs.")
+    parser.add_argument("-u", "--uniprot_id", required=True,
+                        help="UniProt ID to fetch.")
+    parser.add_argument("-p", "--pdb", required=True,
+                        help="PDB file to save the model.")
+    parser.add_argument("--version", action="version", version=__version__)
+
+    args = parser.parse_args()
+    if not args.uniprot_id or not args.pdb:
+        parser.print_help()
+        return
+    pdb = alpha_get(args.uniprot_id)
+    pdb.save(args.pdb)
 
 
 def alpha_fix_cli():
