@@ -26,6 +26,9 @@
 #                  for each chain and list the differences between
 #                  the input structure and the Alphafold structure.
 #
+#   alpha_get:     Download the Alphafold structure for a given
+#                  UniProt ID.
+#
 #   alpha_fix:     Similar to alpha_check, but then use a restrained
 #                  optimization of the alphafold structures to generate
 #                  completed structures for the input, adding missing
@@ -224,6 +227,9 @@ def hetify(pdbin):
     t = _trajify(pdbin)
     non_protein = t.topology.select('not protein')
     het_residues = set([t.topology.atom(i).residue.name for i in non_protein])
+    for r in ('HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'CYM'):
+        if r in het_residues:
+            het_residues.remove(r)
     in_data = _pdbify(pdbin).read_text().split('\n')
     out_data = ''
     for line in in_data:
@@ -521,6 +527,20 @@ def match_align(pdb_in, pdb_ref, cutoff=0.02, renumber=False, align=True):
     return _pdbify(t_out), alignment
 
 
+def clean_pdb(pdbfile):
+    '''
+    Remove junk added to PDB files by reduce
+    '''
+    in_data = pdbfile.read_text().split('\n')
+    out_data = []
+    for line in in_data:
+        words = line.split()
+        if len(words) > 0:
+            if words[0] in ('ATOM', 'HETATM', 'TER', 'END', 'CONECT'):
+                out_data.append(line)
+    pdbfile.write_text('\n'.join(out_data))
+
+
 def complete(pdb_in):
     '''
     Complete a structure by adding missing atoms using pdb4amber.
@@ -540,45 +560,62 @@ def complete(pdb_in):
     _check_available('reduce')
     # Step 1: add missing heavy atoms
     pdb4amber = SubprocessTask(
-        'pdb4amber -i in.pdb --add-missing-atoms --no-conect'
-        ' | sed "s/HIE/HIS/g" > out.pdb'
-        )
+        'pdb4amber -i in.pdb --add-missing-atoms --no-conect -o out.pdb')
     pdb4amber.set_inputs(['in.pdb'])
     pdb4amber.set_outputs(['out.pdb'])
     out = pdb4amber(pdb_in)
+    # Step 1b: correct His residue names
+    out.write_text(out.read_text().replace('HIE', 'HIS'))
+
     # Step 2; remove all current hydrogens, then run through reduce, though its
     # only the NQH flips:
-    reduce = SubprocessTask(
-        'reduce -Trim in.pdb | reduce -BUILD - | reduce -Trim - > out.pdb'
-        )
-    reduce.set_inputs(['in.pdb'])
-    # reduce can return non-zero error codes even when things are ok (enough)
-    reduce.set_outputs(['out.pdb', 'DEBUGINFO'])
-    out, info = reduce(out)
-    if isinstance(info, CalledProcessError):
+    trim = SubprocessTask(
+        'reduce -Trim in.pdb > out.pdb'
+    )
+    trim.set_inputs(['in.pdb'])
+    trim.set_outputs(['out.pdb', 'DEBUGINFO'])
+    build = SubprocessTask(
+        'reduce -BUILD in.pdb > out.pdb'
+    )
+    build.set_inputs(['in.pdb'])
+    build.set_outputs(['out.pdb', 'DEBUGINFO'])
+
+    out1, info1 = trim(out)
+    clean_pdb(out1)
+    if isinstance(info1, CalledProcessError):
         print("Warning: reduce returned with non-zero exit code")
+    out2, info2 = build(out1)
+    clean_pdb(out2)
+    if isinstance(info2, CalledProcessError):
+        print("Warning: reduce returned with non-zero exit code")
+    out3, info3 = trim(out2)
+    clean_pdb(out3)
+    if isinstance(info3, CalledProcessError):
+        print("Warning: reduce returned with non-zero exit code")
+
+    # print(out3.read_text())
+    # print(info3)
+
     # Step 3: Correct the HIS residues
     pdb4amber = SubprocessTask(
-        'pdb4amber -i in.pdb --reduce --no-conect > out.pdb'
+        'pdb4amber -i in.pdb --reduce --no-conect -o out.pdb'
         )
     pdb4amber.set_inputs(['in.pdb'])
     pdb4amber.set_outputs(['out.pdb'])
-    out = pdb4amber(out)
-
-    t_out = mdt.load_pdb(out, standard_names=False)
+    out = pdb4amber(out3)
     # Step 4: Remove hydrogens
-    t_out = t_out.atom_slice(t_out.topology.select('not element H'))
-    # renumber atoms so conect records are right:
-    for i, a in enumerate(t_out.topology.atoms):
-        a.serial = i + 1
-    pdb_out = _pdbify(t_out)
+    strip_h = SubprocessTask(
+        'pdb4amber -i in.pdb --nohyd -o out.pdb')
+    strip_h.set_inputs(['in.pdb'])
+    strip_h.set_outputs(['out.pdb'])
+    pdb_out = strip_h(out)
     print(pdb_diff(pdb_in, pdb_out))
     return hetify(pdb_out)
 
 
 def sp_search(seq):
     '''
-    Search swissprot for a sequence using a local installation of blastp
+    Search swissprot for a sequepnce using a local installation of blastp
 
     Args:
         seq (str): The query sequence to search for.
@@ -1220,9 +1257,15 @@ def rest_min(pdbin, pdbref=None, kr=1.0, maxcyc=200):
     Returns:
         (FileHandle, str): minimized structure (PDB format), and log
     '''
-
+    pdb4amber = SubprocessTask(
+        'pdb4amber -i in.pdb  -o out.pdb'
+        )
+    pdb4amber.set_inputs(['in.pdb'])
+    pdb4amber.set_outputs(['out.pdb'])
+    pdb_tmp = pdb4amber(pdbin)
     try:
-        pdb_out, log = rest_min_omm(pdbin, pdbref=pdbref, kr=kr, maxcyc=maxcyc)
+        pdb_out, log = rest_min_omm(pdb_tmp, pdbref=pdbref, kr=kr,
+                                    maxcyc=maxcyc)
     except ImportError:
         pdb_out, log = rest_min_sander(pdbin, pdbref=pdbref,
                                        kr=kr, maxcyc=maxcyc)
