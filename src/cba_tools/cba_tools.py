@@ -945,23 +945,20 @@ def pdb_diff(p_before, p_after):
 #  Part 5: Tools for (Amber) MD simulation preparation
 
 
-def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
-          het_dir='.',
-          overwrite=False,
-          forcefields=None,
-          solvate=None,
-          ion_molarity=None,
-          padding=10.0,
-          script_only=False):
+def make_leap(inpdb, outinpcrd, outprmtop, het_names=None,
+              het_dir='.',
+              forcefields=None,
+              solvate=None,
+              ion_molarity=None,
+              padding=10.0):
     """
-    Parameterize a PDB file for AMBER simulations.
+    Generate a tleap script to prepare a system for MD simulation.
 
     Args:
         inpdb (path-like): name of input PDB file
-        outprmtop (path-like): name of output prmtop file
         outinpcrd (path-like): name of output inpcrd file
+        outprmtop (path-like): name of output prmtop file
         het_names (None or list): 3-letter residue names for heterogens
-        het_charges (None or list): Formal charges of each heterogen
         forcefields (None or list): List of forcefields to use
         solvate (None or str): Solvation option - can be 'box',
                                'cube', or 'oct'.
@@ -970,11 +967,8 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
         ion_molarity (float or None): If not None, add Na+ and Cl- ions
                                       to reach this molarity (M)
         het_dir (str): Directory to search for heterogen parameter files
-        overwrite (bool): If True, overwrite any existing heterogen
-                          parameter files.
-        script_only (bool): If True, only generate the tleap script,
-                            do not run tleap.
-
+    Returns:
+        str: The tleap script as a string
     """
     _check_exists(inpdb)
     if not forcefields:
@@ -1019,23 +1013,15 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
                   'forcefield has been specified.', file=sys.stderr)
             print('Will default to using "gaff".', file=sys.stderr)
             forcefields.append('gaff')
-            gaff = 'gaff'
-        elif 'gaff' in forcefields:
-            gaff = 'gaff'
-        else:
-            gaff = 'gaff2'
 
-        for h_name, h_charge in zip(het_names, het_charges):
-            print(f'parameterizing heterogen {h_name}')
-            parameterize(inpdb, h_name, h_charge, het_dir=het_dir, gaff=gaff,
-                         overwrite=overwrite)
-
-    if not ion_molarity and script_only:
+    if not ion_molarity:
         try:
             script = leap(
                 inpdb, forcefields, het_names=het_names,
                 solvate=solvate, padding=padding, het_dir=het_dir,
                 script_only=True)
+            script.replace('out.prmtop', str(outprmtop))
+            script.replace('out.inpcrd', str(outinpcrd))
             return script
         except RuntimeError as e:
             print(f'Error in leap:\n{e}')
@@ -1062,28 +1048,18 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
             n_cl = n_ions
         n_na = max(n_na, 0)
         n_cl = max(n_cl, 0)
-        if script_only:
-            try:
-                script = leap(
-                    inpdb, forcefields, het_names=het_names,
-                    solvate=solvate, padding=padding, het_dir=het_dir,
-                    n_na=n_na, n_cl=n_cl, script_only=True)
-                return script
-            except RuntimeError as e:
-                print(f'Error in leap:\n{e}')
-                exit(1)
+
         try:
-            prmtop, inpcrd, stdout = leap(
+            script = leap(
                 inpdb, forcefields, het_names=het_names,
                 solvate=solvate, padding=padding, het_dir=het_dir,
-                n_na=n_na, n_cl=n_cl)
+                n_na=n_na, n_cl=n_cl, script_only=True)
+            script.replace('out.prmtop', str(outprmtop))
+            script.replace('out.inpcrd', str(outinpcrd))
+            return script
         except RuntimeError as e:
             print(f'Error in leap:\n{e}')
             exit(1)
-    prmtop.save(outprmtop)
-    print(f'Parameters written to {outprmtop}')
-    inpcrd.save(outinpcrd)
-    print(f'Coordinates written to {outinpcrd}')
 
 
 @cache
@@ -1199,7 +1175,7 @@ def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
     if solvate:
         if solvate not in ['oct', 'box', 'cube']:
             raise ValueError(f'Error: unrecognised solvate option "{solvate}"')
-        water_box = 'TIP3BOX'
+        water_box = 'TIP3PBOX'
         for f in ff:
             if 'water.opc' in f:
                 water_box = 'OPCBOX'

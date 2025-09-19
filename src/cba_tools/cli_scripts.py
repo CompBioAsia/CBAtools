@@ -1,7 +1,7 @@
 from argparse import ArgumentParser
 import mdtraj as mdt
 from cba_tools._version import __version__
-from cba_tools.cba_tools import param
+from cba_tools.cba_tools import make_leap
 from cba_tools.cba_tools import sp_search, parameterize, alpha_check
 from cba_tools.cba_tools import complete, rest_min, alpha_fix, alpha_get
 
@@ -28,8 +28,8 @@ def het_param_cli():
                  overwrite=parsed_args.overwrite)
 
 
-def param_cli():
-    parser = ArgumentParser(description="Generate AMBER input files from PDB")
+def make_leap_cli():
+    parser = ArgumentParser(description="Generate tleap input script from PDB")
     parser.add_argument('--inpdb', help='Input PDB file', required=True)
     parser.add_argument('--outinpcrd', help='Output AMBER .inpcrd file',
                         required=True)
@@ -38,8 +38,6 @@ def param_cli():
     parser.add_argument('--forcefields', nargs='*', help='Force fields to use')
     parser.add_argument('--het_names', nargs='*',
                         help='Names of heterogen residues')
-    parser.add_argument('--het_charges', nargs='*',
-                        help='Ligand formal charges')
     parser.add_argument('--solvate', help='Type of water box to use',
                         choices=['box', 'cube', 'oct'])
     parser.add_argument('--padding',
@@ -49,15 +47,13 @@ def param_cli():
                         default='.')
     parser.add_argument('--ion_molarity', type=float,
                         help='Target ionic strength (M)')
-    parser.add_argument('--script_only', action='store_true',
-                        help='Only generate the tleap script')
+
     parser.add_argument('--version', action='version', version=__version__)
 
     parsed_args = parser.parse_args()
-    # If param expects positional arguments, pass them directly
-    result = param(**vars(parsed_args))
-    if result and parsed_args.script_only:
-        print(result)
+
+    result = make_leap(**vars(parsed_args))
+    print(result)
 
 
 def prepare_protein_cli():
