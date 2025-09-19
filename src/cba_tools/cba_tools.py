@@ -77,6 +77,7 @@ import shutil
 
 import requests
 from pathlib import Path
+import sys
 
 
 #  Part 1: Various utilities
@@ -114,7 +115,8 @@ def _check_exists(filename):
 def _check_overwrite(path, overwrite):
     if path.exists():
         if overwrite:
-            print(f'Warning, existing file {path} will be over-written')
+            print(f'Warning, existing file {path} will be over-written',
+                  file=sys.stderr)
         else:
             raise FileExistsError(f'Error: {path} already exists')
 
@@ -180,7 +182,8 @@ def unique_chain_ids(t):
             while chain_letters[j] in chain_names:
                 j += 1
                 if j >= len(chain_letters):
-                    print('Warning: too many chains in the trajectory')
+                    print('Warning: too many chains in the trajectory',
+                          file=sys.stderr)
                     return t
             chain.chain_id = chain_letters[j]
             chain_names[i] = chain.chain_id
@@ -583,15 +586,18 @@ def complete(pdb_in):
     out1, info1 = trim(out)
     clean_pdb(out1)
     if isinstance(info1, CalledProcessError):
-        print("Warning: reduce returned with non-zero exit code")
+        print("Warning: reduce returned with non-zero exit code",
+              file=sys.stderr)
     out2, info2 = build(out1)
     clean_pdb(out2)
     if isinstance(info2, CalledProcessError):
-        print("Warning: reduce returned with non-zero exit code")
+        print("Warning: reduce returned with non-zero exit code",
+              file=sys.stderr)
     out3, info3 = trim(out2)
     clean_pdb(out3)
     if isinstance(info3, CalledProcessError):
-        print("Warning: reduce returned with non-zero exit code")
+        print("Warning: reduce returned with non-zero exit code",
+              file=sys.stderr)
 
     # print(out3.read_text())
     # print(info3)
@@ -837,7 +843,7 @@ def alpha_fix(pdb_in, unicodes, trim=False):
         if identity < 0.9:
             wng = f"Warning: only {int(identity * 100)}% identity between"
             wng += f" {unicodes[i]} and chain {i}"
-            print(wng)
+            print(wng, file=sys.stderr)
         istart = 0
         while aln[2][istart] == '-':
             istart += 1
@@ -945,7 +951,8 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
           forcefields=None,
           solvate=None,
           ion_molarity=None,
-          padding=10.0):
+          padding=10.0,
+          script_only=False):
     """
     Parameterize a PDB file for AMBER simulations.
 
@@ -960,12 +967,19 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
                                'cube', or 'oct'.
         padding (float): minimum distance from any solute atom
                         to a periodic box boundary (Angstroms)
+        ion_molarity (float or None): If not None, add Na+ and Cl- ions
+                                      to reach this molarity (M)
+        het_dir (str): Directory to search for heterogen parameter files
+        overwrite (bool): If True, overwrite any existing heterogen
+                          parameter files.
+        script_only (bool): If True, only generate the tleap script,
+                            do not run tleap.
 
     """
     _check_exists(inpdb)
     if not forcefields:
         print('Warning: no forcefields specified, '
-              'defaulting to "protein.ff14SB"')
+              'defaulting to "protein.ff14SB"', file=sys.stderr)
         forcefields = ['protein.ff14SB']
     has_protein_ff = False
     for ff in forcefields:
@@ -974,11 +988,11 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
     if not has_protein_ff:
         if 'gaff2' in forcefields:
             print('Warning: no protein forcefield specified,'
-                  ' defaulting to protein.ff19SB.')
+                  ' defaulting to protein.ff19SB.', file=sys.stderr)
             forcefields.append('protein.ff19SB')
         else:
             print('Warning: no protein forcefield specified,'
-                  ' defaulting to protein.ff14SB.')
+                  ' defaulting to protein.ff14SB.', file=sys.stderr)
             forcefields.append('protein.ff14SB')
     if solvate:
         if solvate not in ['oct', 'box', 'cube']:
@@ -989,19 +1003,21 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
                 water_ff = True
         if not water_ff:
             print('Warning: no water forcefield specified but'
-                  ' solvation required.')
+                  ' solvation required.', file=sys.stderr)
             if 'protein.ff19SB' in forcefields:
-                print('Defaulting to "water.opc" forcefield.')
+                print('Defaulting to "water.opc" forcefield.',
+                      file=sys.stderr)
                 forcefields.append('water.opc')
             else:
-                print('Defaulting to "water.tip3p" forcefield.')
+                print('Defaulting to "water.tip3p" forcefield.',
+                      file=sys.stderr)
                 forcefields.append('water.tip3p')
 
     if het_names is not None:
         if 'gaff' not in forcefields and 'gaff2' not in forcefields:
             print('Warning - heterogens are present but no gaff/gaff2 '
-                  'forcefield has been specified.')
-            print('Will default to using "gaff".')
+                  'forcefield has been specified.', file=sys.stderr)
+            print('Will default to using "gaff".', file=sys.stderr)
             forcefields.append('gaff')
             gaff = 'gaff'
         elif 'gaff' in forcefields:
@@ -1013,6 +1029,17 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
             print(f'parameterizing heterogen {h_name}')
             parameterize(inpdb, h_name, h_charge, het_dir=het_dir, gaff=gaff,
                          overwrite=overwrite)
+
+    if not ion_molarity and script_only:
+        try:
+            script = leap(
+                inpdb, forcefields, het_names=het_names,
+                solvate=solvate, padding=padding, het_dir=het_dir,
+                script_only=True)
+            return script
+        except RuntimeError as e:
+            print(f'Error in leap:\n{e}')
+            exit(1)
 
     try:
         prmtop, inpcrd, stdout = leap(
@@ -1035,6 +1062,16 @@ def param(inpdb, outprmtop, outinpcrd, het_names=None, het_charges=None,
             n_cl = n_ions
         n_na = max(n_na, 0)
         n_cl = max(n_cl, 0)
+        if script_only:
+            try:
+                script = leap(
+                    inpdb, forcefields, het_names=het_names,
+                    solvate=solvate, padding=padding, het_dir=het_dir,
+                    n_na=n_na, n_cl=n_cl, script_only=True)
+                return script
+            except RuntimeError as e:
+                print(f'Error in leap:\n{e}')
+                exit(1)
         try:
             prmtop, inpcrd, stdout = leap(
                 inpdb, forcefields, het_names=het_names,
@@ -1130,8 +1167,7 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
 
 
 def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
-         n_na=0,
-         n_cl=0):
+         n_na=0, n_cl=0, script_only=False):
     '''
     Parameterize a molecular system using tleap.
 
@@ -1145,10 +1181,14 @@ def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
                               parameters
        n_na (int): number of Na+ ions to add (0 = minimal salt)
        n_cl (int): number of Cl- ions to add (0 = minimal salt)
+       script_only (bool): if True, only generate the tleap script
+                            and do not run tleap
 
     Returns:
          (FileHandle, FileHandle, str): prmtop file, inpcrd file,
                                         tleap log text
+        or:
+            str: the tleap script (if script_only=True)
 
     '''
     _check_available('tleap')
@@ -1159,6 +1199,16 @@ def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
     if solvate:
         if solvate not in ['oct', 'box', 'cube']:
             raise ValueError(f'Error: unrecognised solvate option "{solvate}"')
+        water_box = 'TIP3BOX'
+        for f in ff:
+            if 'water.opc' in f:
+                water_box = 'OPCBOX'
+            elif 'water.tip4pew' in f:
+                water_box = 'TIP4PEWBOX'
+            elif 'water.tip4p2005' in f:
+                water_box = 'TIP4P2005BOX'
+            elif 'water.spce' in f:
+                water_box = 'SPCEBOX'
     if het_names:
         if len(het_names) > 0:
             for r in het_names:
@@ -1168,16 +1218,22 @@ def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
                 script += f'{r} = loadmol2 {r}.mol2\n'
                 inputs += [f'{r}.mol2', f'{r}.frcmod']
 
-    script += "system = loadpdb system.pdb\n"
+    if script_only:
+        script += f"system = loadpdb {amberpdb}\n"
+    else:
+        script += "system = loadpdb system.pdb\n"
     if solvate == "oct":
-        script += f"solvateoct system TIP3PBOX {padding}\n"
+        script += f"solvateoct system {water_box} {padding}\n"
     elif solvate == "cube":
-        script += f"solvatebox system TIP3PBOX {padding} iso\n"
+        script += f"solvatebox system {water_box} {padding} iso\n"
     elif solvate == "box":
-        script += f"solvatebox system TIP3PBOX {padding}\n"
+        script += f"solvatebox system {water_box} {padding}\n"
     if solvate is not None:
         script += f"addions system Na+ {n_na}\naddions system Cl- {n_cl}\n"
+
     script += "saveamberparm system system.prmtop system.inpcrd\nquit"
+    if script_only:
+        return script
 
     tleap = SubprocessTask('tleap -f script')
     tleap.set_inputs(inputs)
@@ -1272,7 +1328,8 @@ def rest_min(pdbin, pdbref=None, kr=1.0, maxcyc=200):
 
     bumpinfo = bumps(pdb_out)
     if bumpinfo != '':
-        print('Warning: close contacts detected in output structure')
+        print('Warning: close contacts detected in output structure',
+              file=sys.stderr)
     return pdb_out, log
 
 
@@ -1336,7 +1393,7 @@ def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
             extras = True
     if extras:
         print('Warning: reference structure contains atoms'
-              ' not in input structure')
+              ' not in input structure', file=sys.stderr)
     ref_inds = [a_ids.index(a) for a in ref_ids if a in a_ids]
 
     OPRMTOP = AmberPrmtopFile(prmtop)
@@ -1441,7 +1498,7 @@ def rest_min_sander(pdbin, pdbref=None, kr=1.0, maxcyc=200):
             extras = True
     if extras:
         print('Warning: reference structure contains atoms'
-              ' not in input structure')
+              ' not in input structure', file=sys.stderr)
     ref_inds = [a_ids.index(a) for a in ref_ids if a in a_ids]
 
     t_ref_full = mdt.Trajectory(tin.xyz, tin.topology)

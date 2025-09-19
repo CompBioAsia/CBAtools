@@ -49,12 +49,15 @@ def param_cli():
                         default='.')
     parser.add_argument('--ion_molarity', type=float,
                         help='Target ionic strength (M)')
+    parser.add_argument('--script_only', action='store_true',
+                        help='Only generate the tleap script')
     parser.add_argument('--version', action='version', version=__version__)
 
     parsed_args = parser.parse_args()
     # If param expects positional arguments, pass them directly
     result = param(**vars(parsed_args))
-    return result
+    if result and parsed_args.script_only:
+        print(result)
 
 
 def prepare_protein_cli():
@@ -176,7 +179,7 @@ def alpha_fix_cli():
 def sp_search_cli():
     parser = ArgumentParser(
         description="Search SwissProt for Uniprot codes"
-                    " matching a protein structure."
+                    " matching each chain in a protein structure."
     )
     parser.add_argument("-i", "--inpdb",
                         help="Input protein structure file.", required=True)
@@ -190,7 +193,7 @@ def sp_search_cli():
     indent = ''
     for i, seq in enumerate(seqs):
         if len(seqs) > 1:
-            print(f'Matches for chain {i}:')
+            print(f'Matches for chain {i} ({t.topology.chain(i).chain_id}):')
             indent = '  '
         if len(seq) == 0:
             print(f"{indent}Skipping non-protein chain.")
