@@ -652,6 +652,56 @@ def sp_search(seq):
     return matches
 
 
+def uni_find(pdb_in):
+    '''
+    Find the best matching SwissProt sequences for each chain in a PDB file.
+
+    Args:
+        pdb_in (path-like): The input PDB file.
+
+    Returns:
+        list: A list of Uniprot codes, one per protein chain in the
+        input PDB file.
+
+    '''
+    results = []
+    content = Path(pdb_in).read_text()
+    if 'DBREF' not in content:
+        print('Warning: no DBREF records found in PDB file, '
+              'results may be unreliable', file=sys.stderr)
+    else:
+        for line in content.split('\n'):
+            if line.startswith('DBREF'):
+                results.append(line[33:41].strip())
+    t = _trajify(pdb_in)
+    t_protein = t.atom_slice(t.topology.select('protein and mass > 2.0'))
+    t_protein = unique_chain_ids(t_protein)
+    n_chains = t_protein.topology.n_chains
+    if n_chains == len(results):
+        return results
+    else:
+        if len(results) > 0:
+            print(f'Warning: found {n_chains} protein chains but only '
+                  f'{len(results)} DBREF records', file=sys.stderr)
+        print('Using BLAST to identify sequences instead', file=sys.stderr)
+        results = []
+
+        for i, chain in enumerate(t_protein.topology.chains):
+            chain_indices = t_protein.topology.select(f"chainid {chain.index}")
+            t_chain = t_protein.atom_slice(chain_indices)
+            seq = t_chain.topology.to_fasta()[0]
+            matches = sp_search(seq)
+            if len(matches) == 0:
+                raise ValueError('Error: no matches found for'
+                                 f' chain {chain.chain_id}')
+            best = matches[0]
+            if best['percent_identity'] < 90.0:
+                print(f'Warning: only {best["percent_identity"]}% identity'
+                      f' for chain {chain.chain_id}', file=sys.stderr)
+            results.append(best['uniprotAccession'])
+    return results
+
+
 def alpha_get(uniprot_id, session=None):
     '''
     Get the Alphafold structure with the given Uniprot Id
@@ -768,19 +818,22 @@ def uniprot_diff(prot_pdb, uniprot_id, chain=None, trim=True):
     return log
 
 
-def alpha_check(pdb_in, unicodes):
+def alpha_check(pdb_in, unicodes=None):
     '''
     Check the compatibility of a protein PDB file with Uniprot entries.
 
     Args:
         pdb_in (str): Path to the input PDB file.
-        unicodes (list): List of Uniprot IDs to check against
+        unicodes (None or list): List of Uniprot IDs to check against
                          (one for each protein chain)
+                  if None, the Uniprot IDs are determined automatically.
 
     Returns:
         str: A report of the compatibility check.
 
     '''
+    if unicodes is None:
+        unicodes = uni_find(pdb_in)
     t_in = _trajify(pdb_in, standard_names=True)
     t_protein = t_in.atom_slice(t_in.topology.select('protein and mass > 2.0'))
     t_protein = unique_chain_ids(t_protein)
@@ -801,14 +854,18 @@ def alpha_check(pdb_in, unicodes):
     return log0
 
 
-def alpha_fix(pdb_in, unicodes, trim=False):
+def alpha_fix(pdb_in, unicodes=None, chains=None, trim=False):
     '''
     Complete workflow to remediate a protein PDB file
 
     Args:
         pdb_in (str): Path to the input PDB file.
-        unicodes (list): List of Uniprot IDs to check against
+        unicodes (list or None): List of Uniprot IDs to use
                          (one for each protein chain)
+                         if None, the Uniprot IDs are determined
+                         automatically.
+        chains (list or None): List of chain IDs to include in the
+                        remediated structure
         trim (bool): If True, trim the Alphafold structures to match
                      the input structure. Default is False.
 
@@ -817,7 +874,20 @@ def alpha_fix(pdb_in, unicodes, trim=False):
                            and a report of the fixing process.
 
     '''
+    if unicodes is None:
+        unicodes = uni_find(pdb_in)
     t_in = _trajify(pdb_in, standard_names=True)
+    if chains is not None:
+        chain_ids = [c.chain_id for c in t_in.topology.chains]
+        n_chains = len(chain_ids)
+        for c in chains:
+            if c not in chain_ids:
+                raise ValueError(f'Error: chain {c} not found in PDB file')
+        select = ' or '.join([f'chainid {i}' for i in range(n_chains)
+                              if chain_ids[i] in chains])
+        t_in = t_in.atom_slice(t_in.topology.select(f'({select})'))
+        unicodes = [unicodes[i] for i, c in enumerate(chains)
+                    if c in chain_ids]
     t_protein = t_in.atom_slice(t_in.topology.select('protein and mass > 2.0'))
     t_nonprotein = t_in.atom_slice(t_in.topology.select('not protein'))
     t_protein = unique_chain_ids(t_protein)
@@ -852,6 +922,7 @@ def alpha_fix(pdb_in, unicodes, trim=False):
             iend -= 1
 
         t_tmp = mdt.load_pdb(aligned_alpha)
+        t_tmp.topology.chain(0).chain_id = chain.chain_id
         if trim:
             sel = t_tmp.topology.select(f"resid {istart} to {iend + 1}")
         else:
@@ -861,6 +932,7 @@ def alpha_fix(pdb_in, unicodes, trim=False):
         else:
             t_alpha = t_alpha.stack(t_tmp.atom_slice(sel), keep_resSeq=True)
 
+    t_alpha_top = t_alpha.topology
     # Renumber the original protein to match the alphafold residue numbers:
     prot_renumbered, aln = match_align(t_protein,
                                        t_alpha,
@@ -887,8 +959,9 @@ def alpha_fix(pdb_in, unicodes, trim=False):
     opt_alpha_2, log2 = rest_min(_pdbify(t_alpha))
     if bumps(opt_alpha_2) != '':
         log2 += 'WARNING: Close contacts remain in minimized structure\n'
-
-    t_out = _trajify(opt_alpha_2).stack(t_nonprotein)
+    t_out = _trajify(opt_alpha_2)
+    t_out.topology = t_alpha_top
+    t_out = t_out.stack(t_nonprotein, keep_resSeq=True)
     log = f"{log0}\nOptimisation 1:\n{log1}\nOptimisation 2:\n{log2}"
 
     return hetify(t_out), log
@@ -1064,7 +1137,7 @@ def make_leap(inpdb, outinpcrd, outprmtop, het_names=None,
 
 @cache
 def parameterize(source, residue_name, charge=0, gaff='gaff',
-                 het_dir='.', overwrite=False):
+                 het_dir='.', no_opt=False, overwrite=False):
     '''
     Paramaterize a non-standard residue (heterogen)
 
@@ -1074,6 +1147,12 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
        source (str): the PDB file name
        residue_name (str): the three-letter residue code for the heterogen
        charge: the formal charge on the heterogen
+         gaff (str): which version of gaff to use ('gaff' or 'gaff2')
+         het_dir (str or Path): location of the directory to write
+                                 heterogen parameters
+        no_opt (bool): if True, do not perform energy minimization
+                       on the heterogen structure before parameterization
+        overwrite (bool): if True, overwrite any existing parameter files
 
     Returns:
        list [mol2, frcmod]: crossflow.FileHandles
@@ -1096,7 +1175,7 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
     traj = mdt.load_pdb(source, standard_names=False)
     het_sel = traj.topology.select(f'resname {residue_name}')
     if len(het_sel) == 0:
-        raise ValueError('Error: no residue {residue_name} found in {source}')
+        raise ValueError(f'Error: no residue {residue_name} found in {source}')
 
     # A trajectory that contains all copies of the selected heterogen:
     traj_hets = traj.atom_slice(het_sel)
@@ -1110,17 +1189,24 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
 
     # Run antechamber
     _check_available('antechamber')
+    ek = ''
+    if no_opt:
+        ek = "-ek 'qm_theory=\"AM1\", grms_tol=0.0005,"
+        ek += " scfconv=1.d-10, maxcyc=0'"
+        print('Skipping energy minimization of heterogen')
+    else:
+        print('Performing energy minimization of heterogen')
     if gaff == 'gaff':
         antechamber = SubprocessTask('antechamber -i infile.pdb -fi pdb'
                                      ' -o outfile.mol2 -fo mol2 -c bcc'
-                                     ' -nc {charge}')
+                                     ' -nc {charge} {ek}')
     else:
         antechamber = SubprocessTask('antechamber -i infile.pdb -fi pdb'
                                      ' -o outfile.mol2 -fo mol2 -c bcc'
-                                     ' -nc {charge} -at gaff2')
-    antechamber.set_inputs(['infile.pdb', 'charge'])
+                                     ' -nc {charge} {ek} -at gaff2')
+    antechamber.set_inputs(['infile.pdb', 'charge', 'ek'])
     antechamber.set_outputs(['outfile.mol2'])
-    outmol2 = antechamber(traj_het, charge)
+    outmol2 = antechamber(traj_het, charge, ek)
     # run parmchk2
     _check_available('parmchk2')
     if gaff == 'gaff':

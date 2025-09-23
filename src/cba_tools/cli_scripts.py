@@ -17,6 +17,8 @@ def het_param_cli():
                         default='gaff', choices=['gaff', 'gaff2'])
     parser.add_argument('--het_dir', help='Directory for heterogen files',
                         default='.')
+    parser.add_argument('--no_opt', default=False, action='store_true',
+                        help='Skip optimization at QM stage')
     parser.add_argument('--overwrite', default=False, action='store_true',
                         help='Overwrite existing files')
     parser.add_argument('--version', action='version', version=__version__)
@@ -25,7 +27,7 @@ def het_param_cli():
     parameterize(parsed_args.inpdb, parsed_args.het_name,
                  charge=parsed_args.het_charge,
                  gaff=parsed_args.forcefield, het_dir=parsed_args.het_dir,
-                 overwrite=parsed_args.overwrite)
+                 overwrite=parsed_args.overwrite, no_opt=parsed_args.no_opt)
 
 
 def make_leap_cli():
@@ -108,7 +110,7 @@ def alpha_check_cli():
         description="Check how well a PDB file matches its UniProt sequences.")
     parser.add_argument("-i", "--inpdb",
                         help="Input PDB file.", required=True)
-    parser.add_argument("-u", "--uniprot_ids", nargs='*', required=True,
+    parser.add_argument("-u", "--uniprot_ids", nargs='*', required=False,
                         help="List of UniProt IDs for the input structure.")
     parser.add_argument("-l", "--log", help="Log file for output.")
     parser.add_argument("--version", action="version", version=__version__)
@@ -149,8 +151,9 @@ def alpha_fix_cli():
                         help="Input PDB file.", required=True)
     parser.add_argument("-o", "--outpdb",
                         help="Fixed PDB file.", required=True)
-
-    parser.add_argument("-u", "--uniprot_ids", nargs='*', required=True,
+    parser.add_argument("-c", "--chains", nargs='*', required=False,
+                        help="List of chain IDs to include in the output.")
+    parser.add_argument("-u", "--uniprot_ids", nargs='*', required=False,
                         help="List of UniProt IDs for the input structure.")
     parser.add_argument("-l", "--log", help="Log file for Alphafold output.")
     parser.add_argument("-n", "--no_trim", action="store_true",
@@ -163,7 +166,7 @@ def alpha_fix_cli():
         parser.print_help()
         return
     out_pdb, log = alpha_fix(args.inpdb, args.uniprot_ids,
-                             trim=not args.no_trim)
+                             chains=args.chains, trim=not args.no_trim)
     out_pdb.save(args.outpdb)
     if args.log:
         with open(args.log, 'w') as log_file:
