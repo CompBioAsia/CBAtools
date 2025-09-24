@@ -1093,8 +1093,8 @@ def make_leap(inpdb, outinpcrd, outprmtop, het_names=None,
                 inpdb, forcefields, het_names=het_names,
                 solvate=solvate, padding=padding, het_dir=het_dir,
                 script_only=True)
-            script.replace('out.prmtop', str(outprmtop))
-            script.replace('out.inpcrd', str(outinpcrd))
+            script = script.replace('system.prmtop', str(outprmtop))
+            script = script.replace('system.inpcrd', str(outinpcrd))
             return script
         except RuntimeError as e:
             print(f'Error in leap:\n{e}')
@@ -1127,8 +1127,8 @@ def make_leap(inpdb, outinpcrd, outprmtop, het_names=None,
                 inpdb, forcefields, het_names=het_names,
                 solvate=solvate, padding=padding, het_dir=het_dir,
                 n_na=n_na, n_cl=n_cl, script_only=True)
-            script.replace('out.prmtop', str(outprmtop))
-            script.replace('out.inpcrd', str(outinpcrd))
+            script = script.replace('system.prmtop', str(outprmtop))
+            script = script.replace('system.inpcrd', str(outinpcrd))
             return script
         except RuntimeError as e:
             print(f'Error in leap:\n{e}')
