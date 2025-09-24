@@ -4,4 +4,3 @@ numpy
 crossflow
 shutil
 requests
-crossflow
