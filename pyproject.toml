@@ -47,5 +47,6 @@ prepare_protein = "cba_tools.cli_scripts:prepare_protein_cli"
 make_leap = "cba_tools.cli_scripts:make_leap_cli"
 het_param = "cba_tools.cli_scripts:het_param_cli"
 rest_min = "cba_tools.cli_scripts:rest_min_cli"
+mesmy = "cba_tools.cli_scripts:mesmy_cli"
 
 [tool.hatch.metadata.hooks.custom]
