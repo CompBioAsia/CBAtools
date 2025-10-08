@@ -234,16 +234,17 @@ def mesmy_cli():
 # of Montana.
 #
 
+# You may wish to modify some of the parameters below.
 prmtop_file="{args.prmtop}"
 inpcrd_file="{args.inpcrd}"
 solute={nres} # number of residues in solute
-T="310.0"
+T="310.0" # target temperature in K
+PMEMD="pmemd.cuda" # name of your pmemd executable (e.g. may be "pmemd.cuda")
 
-PMEMD="pmemd.cuda"
-
+### DO NOT MODIFY BELOW THIS LINE UNLESS YOU KNOW WHAT YOU ARE DOING ###
 # 1K step energy minimization with strong restraints on heavy atoms, no shake
 cat > step1.in <<EOF
-Min explicit solvent heavy atom rest no shake
+Min with strong restraints on heavy atoms, no shake
 &cntrl
   imin = 1, ncyc = 50, maxcyc = 1000,
   ntpr = 50,
@@ -251,9 +252,9 @@ Min explicit solvent heavy atom rest no shake
 &end
 EOF
 
-# NTV MD with strong restraints on heavy atoms, shake, dt=.001, 15 ps
+# NVT MD with strong restraints on heavy atoms, shake, dt=.001, 15 ps
 cat > step2.in <<EOF
-MD explicit solvent heavy atom rest shake dt 0.001
+NVT MD with strong restraints on heavy atoms, shake dt 0.001 15 ps
 &cntrl
   imin = 0, nstlim = 30000, dt=0.001,
   ntpr = 50, ntwr = 500,
@@ -266,7 +267,7 @@ EOF
 
 # Energy minimization with relaxed restraints on heavy atoms, no shake
 cat > step3.in <<EOF
-Min explicit solvent relaxed heavy atom rest no shake
+Min with relaxed restraints on heavy atoms
 &cntrl
   imin = 1, ncyc = 50, maxcyc = 1000,
   ntpr = 50,
@@ -276,7 +277,7 @@ EOF
 
 # Energy minimization with minimal restraints on heavy atoms, no shake
 cat > step4.in <<EOF
-Min explicit solvent minimal heavy atom rest no shake
+Min with minimal restraints on heavy atoms
 &cntrl
   imin = 1, ncyc = 50, maxcyc = 1000,
   ntpr = 50,
@@ -286,16 +287,16 @@ EOF
 
 # Energy minimization with no restraints, no shake
 cat > step5.in <<EOF
-Min explicit solvent no heavy atom res no shake
+Min with no restraints
 &cntrl
   imin = 1, ncyc = 50, maxcyc = 1000,
   ntpr = 50,
 &end
 EOF
 
-# NTP MD with shake and low restraints on heavy atoms, 20 ps dt=.002
+# NPT MD with shake and low restraints on heavy atoms, 20 ps dt=.002
 cat > step6.in <<EOF
-MD explicit solvent heavy atom low rest shake dt 0.002
+NPT MD with shake and low restraints on heavy atoms, 20 ps dt=.002
 &cntrl
   imin = 0, nstlim = 10000, dt = 0.002,
   ntwx = 1000, ntpr = 50, ntwr = 500,
@@ -307,9 +308,9 @@ MD explicit solvent heavy atom low rest shake dt 0.002
 &end
 EOF
 
-# NTP MD with shake and minimal restraints on heavy atoms
+# NPT MD with shake and minimal restraints on heavy atoms
 cat > step7.in <<EOF
-MD explicit solvent heavy atom minimal rest shake 20 ps, dt=.002
+NPT MD with minimal restraints on heavy atoms, 20 ps dt=.002
 &cntrl
   imin = 0, nstlim = 10000, dt=0.002,
   ntx = 5, irest = 1,
@@ -322,9 +323,9 @@ MD explicit solvent heavy atom minimal rest shake 20 ps, dt=.002
 &end
 EOF
 
-# NTP MD with shake and minimal restraints on backbone atoms, dt=0.002, 20 ps
+# NPT MD with shake and minimal restraints on backbone atoms, dt=0.002, 20 ps
 cat > step8.in <<EOF
-MD explicit solvent heavy atom minimal BB rest shake dt 0.002
+NPT MD with minimal restraints on backbone atoms, 20 ps dt=.002
 &cntrl
   imin = 0, nstlim = 10000, dt=0.002,
   ntx = 5, irest = 1,
@@ -337,9 +338,9 @@ MD explicit solvent heavy atom minimal BB rest shake dt 0.002
 &end
 EOF
 
-# NTP MD with shake and no restraints, dt=0.002, 200 ps
+# NPT MD with shake and no restraints, dt=0.002, 200 ps
 cat > step9.in <<EOF
-MD explicit solvent heavy atom no rest shake dt 0.002
+NPT MD no restraints, dt=0.002, 200 ps
 &cntrl
   imin = 0, nstlim = 10000, dt=0.002,
   ntx = 5, irest = 1,
@@ -358,15 +359,35 @@ for RUN in step1 step2 step3 step4 step5 ; do
  echo "------------------------"
  echo "Minimization phase: $RUN"
  echo "------------------------"
- if [[ ! -f $RUN.rst7 ]]; then
-     echo "File -- $RUN.rst7 -- does not exists. Running job..."
-     $PMEMD -O -i $RUN.in -p $prmtop_file -c $inpcrd_file -ref $inpcrd_file \
-        -o $RUN.out -x $RUN.nc -r $RUN.rst7 -inf $RUN.info
+ if [[ ! -f $RUN.out ]]; then
+     echo "File -- $RUN.out -- does not exists. Running job..."
+     runme=1
  else
-     echo "File -- $RUN.rst7 -- exists.  Checking the next step."
+     grep -q 'Total wall time' $RUN.out
+     retval=$?
+     if [ $retval -ne 0 ]; then
+     echo "$RUN did not complete last time. Trying again..."
+     runme=1
+     else
+         echo "$RUN has already completed.  Checking the next step."
+         runme=0
+     fi
  fi
+
+ if [ $runme -eq 1 ]; then
+     $PMEMD -O -i $RUN.in -p $prmtop_file -c $inpcrd_file \
+        -ref $inpcrd_file -o $RUN.out -x $RUN.nc -r $RUN.ncrst \
+            -inf $RUN.mdinfo
+     grep -q 'Total wall time' $RUN.out
+     retval=$?
+     if [ $retval -ne 0 ]; then
+         echo "Error - job failed at this step."
+     exit $retval
+     fi
+ fi
+
  echo ""
- inpcrd_file="$RUN.rst7"
+ inpcrd_file="$RUN.ncrst"
 done
 
 # Equilibration phase - reference coords are last coords from minimize phase
@@ -376,24 +397,43 @@ for RUN in step6 step7 step8 step9 ; do
  echo "------------------------"
  echo "Equilibration phase: $RUN"
  echo "------------------------"
- if [[ ! -f $RUN.rst7 ]]; then
-     echo "File -- $RUN.rst7 -- does not exists. Running job..."
-     $PMEMD -O -i $RUN.in -p $prmtop_file -c $inpcrd_file -ref $REF \
-        -o $RUN.out -x $RUN.nc -r $RUN.rst7 -inf $RUN.mdinfo
+ if [[ ! -f $RUN.out ]]; then
+     echo "File -- $RUN.out -- does not exists. Running job..."
+     runme=1
  else
-     echo "File -- $RUN.rst7 -- exists.  Checking the next step."
+     grep -q 'Total wall time' $RUN.out
+     retval=$?
+     if [ $retval -ne 0 ]; then
+     echo "$RUN did not complete last time. Trying again..."
+     runme=1
+     else
+         echo "$RUN has already completed.  Checking the next step."
+         runme=0
+     fi
  fi
-  echo ""
-  inpcrd_file="$RUN.rst7"
 
+ if [ $runme -eq 1 ]; then
+     $PMEMD -O -i $RUN.in -p $prmtop_file -c $inpcrd_file\
+        -ref $REF -o $RUN.out -x $RUN.nc -r $RUN.ncrst -inf $RUN.mdinfo
+     grep -q 'Total wall time' $RUN.out
+     retval=$?
+     if [ $retval -ne 0 ]; then
+         echo "Error - job failed at this step."
+     exit $retval
+     fi
+ fi
+
+ echo ""
+ inpcrd_file="$RUN.ncrst"
 done
 
 # Reset the time in the restart file to zero:
-sed -i "s/0.3000000E+02/0.0000000E+00/g" step9.rst7
+sed -i 's/0.3000000E+02/0.0000000E+00/g' step9.ncrst
 
 STOP="`date +%s.%N`"
-TIMING=`echo "scale=4; $STOP - $START;" | bc`
-echo "$TIMING seconds."
+# The divide by 1 in the line below is to overcome a bug in bc...
+TIMING=`echo "scale=1; ($STOP - $START) / 1;" | bc`
+echo "Total run time: $TIMING seconds."
 echo ""
 
 exit 0
