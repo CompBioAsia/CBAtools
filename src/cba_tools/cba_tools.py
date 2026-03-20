@@ -13,27 +13,16 @@
 # b) Python packages that will be automatically installed:
 #   MDTraj
 #   OpenMM
+#   alphafix
 #
 # The functions are:
 #
-#   sp_search:     Perform a BLAST search of SwissProt to find
-#                  sequences identical (or highly homologous) to
-#                  each chain in the input structure.
-#                  Requires blastp to be available.
-#
-#   alpha_check:   Using uniprot ids found from sp_search,
-#                  obtain the corresponding Alphafold structures
-#                  for each chain and list the differences between
-#                  the input structure and the Alphafold structure.
-#
-#   alpha_get:     Download the Alphafold structure for a given
-#                  UniProt ID.
-#
-#   alpha_fix:     Similar to alpha_check, but then use a restrained
-#                  optimization of the alphafold structures to generate
-#                  completed structures for the input, adding missing
-#                  loops and missing heavy atoms.
-#                  Internally uses OpenMM
+#   smiles_to_pdb: Convert a SMILES string to a PDB file using OpenBabel
+#                  and RDKit. This is useful for generating initial structures
+#                  structures of ligands for MD simulations. The method
+#                  attempts to generate structures in a protonation state
+#                  appropriate for a chosen pH (default 7.4), but this is not
+#                  guaranteed to be correct.
 #
 #   prepare_protein: Prepare a protein structure for parameterization
 #                  with Amber. This includes fixing residue names
@@ -69,13 +58,16 @@
 import mdtraj as mdt
 import numpy as np
 
+from rdkit import Chem
+from rdkit.Chem import rdDistGeom
+from openbabel import openbabel as ob
+
 from crossflow.tasks import SubprocessTask, CalledProcessError
 from crossflow.filehandling import FileHandler, FileHandle
 from functools import cache
 from enum import IntEnum
 import shutil
 
-import requests
 from pathlib import Path
 import sys
 
@@ -558,7 +550,6 @@ def complete(pdb_in):
         Filehandle: The path to the completed PDB file.
 
     '''
-
     _check_available('pdb4amber')
     _check_available('reduce')
     # Step 1: add missing heavy atoms
@@ -571,7 +562,7 @@ def complete(pdb_in):
     out.write_text(out.read_text().replace('HIE', 'HIS'))
 
     # Step 2; remove all current hydrogens, then run through reduce, though its
-    # only the NQH flips:
+    # only the NQH flips that interest us:
     trim = SubprocessTask(
         'reduce -Trim in.pdb > out.pdb'
     )
@@ -599,9 +590,6 @@ def complete(pdb_in):
         print("Warning: reduce returned with non-zero exit code",
               file=sys.stderr)
 
-    # print(out3.read_text())
-    # print(info3)
-
     # Step 3: Correct the HIS residues
     pdb4amber = SubprocessTask(
         'pdb4amber -i in.pdb --reduce --no-conect -o out.pdb'
@@ -617,354 +605,6 @@ def complete(pdb_in):
     pdb_out = strip_h(out)
     print(pdb_diff(pdb_in, pdb_out))
     return hetify(pdb_out)
-
-
-def sp_search(seq):
-    '''
-    Search swissprot for a sequepnce using a local installation of blastp
-
-    Args:
-        seq (str): The query sequence to search for.
-
-    Returns:
-        list: A list of dictionaries with Uniprot codes of matching sequences
-            in SwissProtand their % sequence identities.
-
-    '''
-    _check_available('blastp')
-    fh = FileHandler()
-    fasta = fh.create('tmp.fasta')
-    fasta.write_text(f'>query\n{seq}\n')
-    blastp = SubprocessTask('blastp -query x.fasta -db swissprot -out x.csv'
-                            ' -outfmt "10 sacc pident" -max_target_seqs 10')
-    blastp.set_inputs(['x.fasta'])
-    blastp.set_outputs(['x.csv'])
-    csvout = blastp(fasta)
-    results = csvout.read_text().strip().split('\n')
-
-    matches = []
-    for m in results:
-        fields = m.split(',')
-        uac = fields[0]
-        match = {'uniprotAccession': uac}
-        match['percent_identity'] = float(fields[1])
-        matches.append(match)
-    return matches
-
-
-def uni_find(pdb_in):
-    '''
-    Find the best matching SwissProt sequences for each chain in a PDB file.
-
-    Args:
-        pdb_in (path-like): The input PDB file.
-
-    Returns:
-        list: A list of Uniprot codes, one per protein chain in the
-        input PDB file.
-
-    '''
-    results = []
-    content = Path(pdb_in).read_text()
-    if 'DBREF' not in content:
-        print('Warning: no DBREF records found in PDB file, '
-              'results may be unreliable', file=sys.stderr)
-    else:
-        for line in content.split('\n'):
-            if line.startswith('DBREF'):
-                results.append(line[33:41].strip())
-    t = _trajify(pdb_in)
-    t_protein = t.atom_slice(t.topology.select('protein and mass > 2.0'))
-    t_protein = unique_chain_ids(t_protein)
-    n_chains = t_protein.topology.n_chains
-    if n_chains == len(results):
-        return results
-    else:
-        if len(results) > 0:
-            print(f'Warning: found {n_chains} protein chains but only '
-                  f'{len(results)} DBREF records', file=sys.stderr)
-        print('Using BLAST to identify sequences instead', file=sys.stderr)
-        results = []
-
-        for i, chain in enumerate(t_protein.topology.chains):
-            chain_indices = t_protein.topology.select(f"chainid {chain.index}")
-            t_chain = t_protein.atom_slice(chain_indices)
-            seq = t_chain.topology.to_fasta()[0]
-            matches = sp_search(seq)
-            if len(matches) == 0:
-                raise ValueError('Error: no matches found for'
-                                 f' chain {chain.chain_id}')
-            best = matches[0]
-            if best['percent_identity'] < 90.0:
-                print(f'Warning: only {best["percent_identity"]}% identity'
-                      f' for chain {chain.chain_id}', file=sys.stderr)
-            results.append(best['uniprotAccession'])
-    return results
-
-
-def alpha_get(uniprot_id, session=None):
-    '''
-    Get the Alphafold structure with the given Uniprot Id
-    If it exists
-
-    Args:
-        uniprot_id (str): The Uniprot ID to retrieve the structure for.
-        session (requests.Session, optional): A requests session to use for
-                                              the API call.
-
-    Returns:
-        FileHandle: A file handle for the downloaded PDB file.
-    '''
-    if not session:
-        #  session = retry(requests.Session(), retries=5, backoff_factor=0.2)
-        session = requests.Session()
-    base_url = f'https://alphafold.com/api/prediction/{uniprot_id}'
-    response = session.get(base_url)
-    data = response.json()
-    if 'error' in data:
-        raise ValueError(f'Error: {uniprot_id} not in Alphafold database')
-
-    pdb_url = data[0]['pdbUrl']
-    response2 = session.get(pdb_url)
-    fh = FileHandler()
-    pdbout = fh.create('tmp.pdb')
-    pdbout.write_text(response2.text)
-    return pdbout
-
-
-def uniprot_diff(prot_pdb, uniprot_id, chain=None, trim=True):
-    '''
-    Compare a protein structure with a Uniprot entry.
-
-    Args:
-        prot_pdb (str): path to the PDB file of the protein structure
-        uniprot_id (str): Uniprot ID to compare with
-        chain (str): chain ID to compare with, if None, all chains are compared
-        trim (bool): whether to note missing residues at N- and C-terminii
-
-    Returns:
-        str: report of differences
-
-    '''
-    t_in = _trajify(prot_pdb, standard_names=True)
-    t_uniprot = _trajify(alpha_get(uniprot_id))
-
-    if chain is not None:
-        t_in = t_in.atom_slice(t_in.topology.select(f'chainid {chain}'))
-
-    _, aln = match_align(t_uniprot, t_in)
-    log = ''
-    i = 0
-    code = ''
-    for a, p in zip(aln[0], aln[2]):
-        if p != '-':
-            if a == p:
-                code += '.'
-            else:
-                code += 'm'
-        else:
-            code += '-'
-
-    seglengths = []
-    sl = 0
-    c = code[0]
-    for i in range(len(code)):
-        if code[i] == c:
-            sl += 1
-        else:
-            seglengths.append(sl)
-            sl = 1
-        c = code[i]
-    seglengths.append(sl)
-
-    n_segs = len(seglengths)
-
-    i = 0
-    ii = -1
-    for i_seg in range(n_segs):
-        sl = seglengths[i_seg]
-        j = i + sl
-        if code[i] == '-':
-            if sl > 1:
-                log += "  Missing residues: "
-                log += f"{aln[0][i]}{i+1}-{aln[0][j-1]}{j}"
-                if not trim or (i_seg != 0 and i_seg != n_segs - 1):
-                    log += "\n"
-                else:
-                    log += " (Ignored)\n"
-        elif code[i] == 'm':
-            for k in range(i, j):
-                ii += 1
-                log += f"  Mutation:         {aln[0][k]}{k+1}->{aln[2][k]}\n"
-        elif code[i] == '.':
-            for k in range(i, j):
-                ii += 1
-                r_in = t_in.topology.residue(ii).name
-                r_uniprot = t_uniprot.topology.residue(k).name
-                if r_in != r_uniprot:
-                    errmsg_a = f". Error: residue {ii+1} in input PDB does not"
-                    errmsg_b = f"   match residue {k+1} in Uniprot"
-                    raise ValueError(errmsg_a + errmsg_b)
-                h_indx = t_in.topology.select(f'resid {ii} and mass > 2.0')
-                h_in = [t_in.topology.atom(h).name for h in h_indx]
-                a_indx = t_uniprot.topology.select(f'resid {k} and mass > 2.0')
-                a_in = [t_uniprot.topology.atom(a).name for a in a_indx]
-                msg = [a for a in a_in if a not in h_in]
-                if len(msg) > 0:
-                    txt = ', '.join(msg)
-                    log += f"  Missing atoms:    {aln[0][k]}{k+1}: {txt}\n"
-        i += sl
-
-    return log
-
-
-def alpha_check(pdb_in, unicodes=None):
-    '''
-    Check the compatibility of a protein PDB file with Uniprot entries.
-
-    Args:
-        pdb_in (str): Path to the input PDB file.
-        unicodes (None or list): List of Uniprot IDs to check against
-                         (one for each protein chain)
-                  if None, the Uniprot IDs are determined automatically.
-
-    Returns:
-        str: A report of the compatibility check.
-
-    '''
-    if unicodes is None:
-        unicodes = uni_find(pdb_in)
-    t_in = _trajify(pdb_in, standard_names=True)
-    t_protein = t_in.atom_slice(t_in.topology.select('protein and mass > 2.0'))
-    t_protein = unique_chain_ids(t_protein)
-    n_chains = t_protein.topology.n_chains
-    if n_chains != len(unicodes):
-        err_a = f'Error: there are {n_chains} chains in the PDB file but'
-        err_b = f' you supplied {len(unicodes)} uniprot codes.'
-        raise ValueError(err_a + err_b)
-    # Step 1: generate an alphafold based starting structure
-    log0 = '*** ALPHACHECK V. 0.1 ***\n'
-    for i, chain in enumerate(t_protein.topology.chains):
-        chain_indices = t_protein.topology.select(f"chainid {chain.index}")
-        t_chain = t_protein.atom_slice(chain_indices)
-        _ = alpha_get(unicodes[i])
-        log0 += f"Comparison of protein chain {chain.chain_id} "
-        log0 += f"with uniprot entry {unicodes[i]}:\n"
-        log0 += uniprot_diff(t_chain, unicodes[i]) + "\n"
-    return log0
-
-
-def alpha_fix(pdb_in, unicodes=None, chains=None, trim=False):
-    '''
-    Complete workflow to remediate a protein PDB file
-
-    Args:
-        pdb_in (str): Path to the input PDB file.
-        unicodes (list or None): List of Uniprot IDs to use
-                         (one for each protein chain)
-                         if None, the Uniprot IDs are determined
-                         automatically.
-        chains (list or None): List of chain IDs to include in the
-                        remediated structure
-        trim (bool): If True, trim the Alphafold structures to match
-                     the input structure. Default is False.
-
-    Returns:
-        (Filehandle, str): A filehandle for the remediated structure
-                           and a report of the fixing process.
-
-    '''
-    if unicodes is None:
-        unicodes = uni_find(pdb_in)
-    t_in = _trajify(pdb_in, standard_names=True)
-    if chains is not None:
-        chain_ids = [c.chain_id for c in t_in.topology.chains]
-        n_chains = len(chain_ids)
-        for c in chains:
-            if c not in chain_ids:
-                raise ValueError(f'Error: chain {c} not found in PDB file')
-        select = ' or '.join([f'chainid {i}' for i in range(n_chains)
-                              if chain_ids[i] in chains])
-        t_in = t_in.atom_slice(t_in.topology.select(f'({select})'))
-        unicodes = [unicodes[i] for i, c in enumerate(chains)
-                    if c in chain_ids]
-    t_protein = t_in.atom_slice(t_in.topology.select('protein and mass > 2.0'))
-    t_nonprotein = t_in.atom_slice(t_in.topology.select('not protein'))
-    t_protein = unique_chain_ids(t_protein)
-    n_chains = t_protein.topology.n_chains
-    if n_chains != len(unicodes):
-        err_a = f'Error: there are {n_chains} chains in the PDB file but'
-        err_b = f' you supplied {len(unicodes)} uniprot codes.'
-        raise ValueError(err_a + err_b)
-    # Step 1: generate an alphafold based starting structure
-    t_alpha = None
-    log0 = '*** ALPHAFIX V. 0.1 ***\n'
-    for i, chain in enumerate(t_protein.topology.chains):
-        chain_indices = t_protein.topology.select(f"chainid {chain.index}")
-        t_chain = t_protein.atom_slice(chain_indices)
-        alpha = alpha_get(unicodes[i])
-        log0 += f"Comparison of protein chain {chain.chain_id} "
-        log0 += f"with uniprot entry {unicodes[i]}:\n"
-        log0 += uniprot_diff(t_chain, unicodes[i]) + "\n"
-        # Align the alphafold structure with the chain:
-        aligned_alpha, aln = match_align(alpha, t_chain)
-        score = aln_score((aln[0], aln[2]))
-        identity = score[0] / t_chain.topology.n_residues
-        if identity < 0.9:
-            wng = f"Warning: only {int(identity * 100)}% identity between"
-            wng += f" {unicodes[i]} and chain {i}"
-            print(wng, file=sys.stderr)
-        istart = 0
-        while aln[2][istart] == '-':
-            istart += 1
-        iend = len(aln[2]) - 1
-        while aln[2][iend] == '-':
-            iend -= 1
-
-        t_tmp = mdt.load_pdb(aligned_alpha)
-        t_tmp.topology.chain(0).chain_id = chain.chain_id
-        if trim:
-            sel = t_tmp.topology.select(f"resid {istart} to {iend + 1}")
-        else:
-            sel = t_tmp.topology.select("all")
-        if t_alpha is None:
-            t_alpha = t_tmp.atom_slice(sel)
-        else:
-            t_alpha = t_alpha.stack(t_tmp.atom_slice(sel), keep_resSeq=True)
-
-    t_alpha_top = t_alpha.topology
-    # Renumber the original protein to match the alphafold residue numbers:
-    prot_renumbered, aln = match_align(t_protein,
-                                       t_alpha,
-                                       renumber=True,
-                                       align=False)
-    # Energy minimize the aligned alphafold structure
-    #   with restraints to the original atom positions:
-    opt_alpha_1, log1 = rest_min(_pdbify(t_alpha), prot_renumbered)
-    if bumps(opt_alpha_1) != '':
-        log1 += 'WARNING: Close contacts remain in minimized structure\n'
-
-    # Replace coordinates in minimized alphafold structure
-    #   with their exact original values where possible:
-    t_alpha = mdt.load_pdb(opt_alpha_1)
-    t_orig = mdt.load_pdb(prot_renumbered)
-    id_orig = [atom_id(a) for a in t_orig.topology.atoms]
-    id_alpha = [atom_id(a) for a in t_alpha.topology.atoms]
-    for i, a in enumerate(id_orig):
-        if a in id_alpha:
-            j = id_alpha.index(a)
-            t_alpha.xyz[0, j] = t_orig.xyz[0, i]
-
-    # Second round of restrained energy minimization:
-    opt_alpha_2, log2 = rest_min(_pdbify(t_alpha))
-    if bumps(opt_alpha_2) != '':
-        log2 += 'WARNING: Close contacts remain in minimized structure\n'
-    t_out = _trajify(opt_alpha_2)
-    t_out.topology = t_alpha_top
-    t_out = t_out.stack(t_nonprotein, keep_resSeq=True)
-    log = f"{log0}\nOptimisation 1:\n{log1}\nOptimisation 2:\n{log2}"
-
-    return hetify(t_out), log
 
 
 def pdb_diff(p_before, p_after):
@@ -1015,124 +655,35 @@ def pdb_diff(p_before, p_after):
     return report
 
 
-#  Part 5: Tools for (Amber) MD simulation preparation
+#  Part 4: Tools for ligand parameterization with AmberTools
 
-
-def make_leap(inpdb, outinpcrd, outprmtop, het_names=None,
-              het_dir='.',
-              forcefields=None,
-              solvate=None,
-              ion_molarity=None,
-              padding=10.0):
-    """
-    Generate a tleap script to prepare a system for MD simulation.
+def smiles_to_pdb(smi, pH=7.0):
+    '''
+    Convert an input SMILES representation to a PDB file
 
     Args:
-        inpdb (path-like): name of input PDB file
-        outinpcrd (path-like): name of output inpcrd file
-        outprmtop (path-like): name of output prmtop file
-        het_names (None or list): 3-letter residue names for heterogens
-        forcefields (None or list): List of forcefields to use
-        solvate (None or str): Solvation option - can be 'box',
-                               'cube', or 'oct'.
-        padding (float): minimum distance from any solute atom
-                        to a periodic box boundary (Angstroms)
-        ion_molarity (float or None): If not None, add Na+ and Cl- ions
-                                      to reach this molarity (M)
-        het_dir (str): Directory to search for heterogen parameter files
+        smi (str): Input SMILES string
+        pH (float): target pH
+
     Returns:
-        str: The tleap script as a string
-    """
-    _check_exists(inpdb)
-    if not forcefields:
-        print('Warning: no forcefields specified, '
-              'defaulting to "protein.ff14SB"', file=sys.stderr)
-        forcefields = ['protein.ff14SB']
-    has_protein_ff = False
-    for ff in forcefields:
-        if 'protein' in ff:
-            has_protein_ff = True
-    if not has_protein_ff:
-        if 'gaff2' in forcefields:
-            print('Warning: no protein forcefield specified,'
-                  ' defaulting to protein.ff19SB.', file=sys.stderr)
-            forcefields.append('protein.ff19SB')
-        else:
-            print('Warning: no protein forcefield specified,'
-                  ' defaulting to protein.ff14SB.', file=sys.stderr)
-            forcefields.append('protein.ff14SB')
-    if solvate:
-        if solvate not in ['oct', 'box', 'cube']:
-            raise ValueError(f'Error: unrecognised solvate option "{solvate}"')
-        water_ff = False
-        for ff in forcefields:
-            if 'water' in ff:
-                water_ff = True
-        if not water_ff:
-            print('Warning: no water forcefield specified but'
-                  ' solvation required.', file=sys.stderr)
-            if 'protein.ff19SB' in forcefields:
-                print('Defaulting to "water.opc" forcefield.',
-                      file=sys.stderr)
-                forcefields.append('water.opc')
-            else:
-                print('Defaulting to "water.tip3p" forcefield.',
-                      file=sys.stderr)
-                forcefields.append('water.tip3p')
+        pdb_out (str): The PDB file as a string
+        charge (int): The formal charge on the molecule
 
-    if het_names is not None:
-        if 'gaff' not in forcefields and 'gaff2' not in forcefields:
-            print('Warning - heterogens are present but no gaff/gaff2 '
-                  'forcefield has been specified.', file=sys.stderr)
-            print('Will default to using "gaff".', file=sys.stderr)
-            forcefields.append('gaff')
+    '''
+    obc = ob.OBConversion()
+    obc.SetInAndOutFormats('smi', 'smi')
 
-    if not ion_molarity:
-        try:
-            script = leap(
-                inpdb, forcefields, het_names=het_names,
-                solvate=solvate, padding=padding, het_dir=het_dir,
-                script_only=True)
-            script = script.replace('system.prmtop', str(outprmtop))
-            script = script.replace('system.inpcrd', str(outinpcrd))
-            return script
-        except RuntimeError as e:
-            print(f'Error in leap:\n{e}')
-            exit(1)
+    obmol = ob.OBMol()
+    obc.ReadString(obmol, smi)
+    obmol.CorrectForPH(pH)
+    smi_pH = obc.WriteString(obmol)
+    charge = smi_pH.count('+]') - smi_pH.count('-]')
+    mol_pH = Chem.MolFromSmiles(smi_pH)
+    mol_pH_H = Chem.AddHs(mol_pH)
+    rdDistGeom.EmbedMolecule(mol_pH_H)
+    pdb_out = Chem.MolToPDBBlock(mol_pH_H)
 
-    try:
-        prmtop, inpcrd, stdout = leap(
-            inpdb, forcefields, het_names=het_names,
-            solvate=solvate, padding=padding, het_dir=het_dir)
-    except RuntimeError as e:
-        print(f'Error in leap:\n{e}')
-        exit(1)
-    if ion_molarity:
-        ttmp = mdt.load(inpcrd, top=prmtop)
-        n_waters = len(ttmp.topology.select('name O and resname HOH'))
-        n_na = len(ttmp.topology.select('name "Na+"'))
-        n_cl = len(ttmp.topology.select('name "Cl-"'))
-        n_ions = int(ion_molarity * n_waters/55.56)
-        if n_na > 0:
-            n_cl = n_ions - n_na
-            n_na = n_ions
-        else:
-            n_na = n_ions - n_cl
-            n_cl = n_ions
-        n_na = max(n_na, 0)
-        n_cl = max(n_cl, 0)
-
-        try:
-            script = leap(
-                inpdb, forcefields, het_names=het_names,
-                solvate=solvate, padding=padding, het_dir=het_dir,
-                n_na=n_na, n_cl=n_cl, script_only=True)
-            script = script.replace('system.prmtop', str(outprmtop))
-            script = script.replace('system.inpcrd', str(outinpcrd))
-            return script
-        except RuntimeError as e:
-            print(f'Error in leap:\n{e}')
-            exit(1)
+    return pdb_out, charge
 
 
 @cache
@@ -1205,8 +756,10 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
                                      ' -o outfile.mol2 -fo mol2 -c bcc'
                                      ' -nc {charge} {ek} -at gaff2')
     antechamber.set_inputs(['infile.pdb', 'charge', 'ek'])
-    antechamber.set_outputs(['outfile.mol2'])
-    outmol2 = antechamber(traj_het, charge, ek)
+    antechamber.set_outputs(['outfile.mol2', 'STDOUT'])
+    outmol2, stdout = antechamber(traj_het, charge, ek)
+    if outmol2 is None:
+        raise RuntimeError(f'Error in antechamber:\n{stdout}')
     # run parmchk2
     _check_available('parmchk2')
     if gaff == 'gaff':
@@ -1228,13 +781,134 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
     frcmod.save(f'{residue_name}.frcmod')
 
 
-def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
+#  Part 5: Tools for (Amber) MD simulation preparation
+
+def make_leap(inpdbs, outinpcrd, outprmtop, het_names=None,
+              het_dir='.',
+              forcefields=None,
+              solvate=None,
+              ion_molarity=None,
+              padding=10.0):
+    """
+    Generate a tleap script to prepare a system for MD simulation.
+
+    Args:
+        inpdbs (list): names of input PDB files
+        outinpcrd (path-like): name of output inpcrd file
+        outprmtop (path-like): name of output prmtop file
+        het_names (None or list): 3-letter residue names for heterogens
+        forcefields (None or list): List of forcefields to use
+        solvate (None or str): Solvation option - can be 'box',
+                               'cube', or 'oct'.
+        padding (float): minimum distance from any solute atom
+                        to a periodic box boundary (Angstroms)
+        ion_molarity (float or None): If not None, add Na+ and Cl- ions
+                                      to reach this molarity (M)
+        het_dir (str): Directory to search for heterogen parameter files
+    Returns:
+        str: The tleap script as a string
+    """
+    for inpdb in inpdbs:
+        _check_exists(inpdb)
+
+    if not forcefields:
+        print('Warning: no forcefields specified, '
+              'defaulting to "protein.ff14SB"', file=sys.stderr)
+        forcefields = ['protein.ff14SB']
+    has_protein_ff = False
+    for ff in forcefields:
+        if 'protein' in ff:
+            has_protein_ff = True
+    if not has_protein_ff:
+        if 'gaff2' in forcefields:
+            print('Warning: no protein forcefield specified,'
+                  ' defaulting to protein.ff19SB.', file=sys.stderr)
+            forcefields.append('protein.ff19SB')
+        else:
+            print('Warning: no protein forcefield specified,'
+                  ' defaulting to protein.ff14SB.', file=sys.stderr)
+            forcefields.append('protein.ff14SB')
+    if solvate:
+        if solvate not in ['oct', 'box', 'cube']:
+            raise ValueError(f'Error: unrecognised solvate option "{solvate}"')
+        water_ff = False
+        for ff in forcefields:
+            if 'water' in ff:
+                water_ff = True
+        if not water_ff:
+            print('Warning: no water forcefield specified but'
+                  ' solvation required.', file=sys.stderr)
+            if 'protein.ff19SB' in forcefields:
+                print('Defaulting to "water.opc" forcefield.',
+                      file=sys.stderr)
+                forcefields.append('water.opc')
+            else:
+                print('Defaulting to "water.tip3p" forcefield.',
+                      file=sys.stderr)
+                forcefields.append('water.tip3p')
+
+    if het_names is not None:
+        if 'gaff' not in forcefields and 'gaff2' not in forcefields:
+            print('Warning - heterogens are present but no gaff/gaff2 '
+                  'forcefield has been specified.', file=sys.stderr)
+            print('Will default to using "gaff".', file=sys.stderr)
+            forcefields.append('gaff')
+
+    if not ion_molarity:
+        try:
+            script = leap(
+                inpdbs, forcefields, het_names=het_names,
+                solvate=solvate, padding=padding, het_dir=het_dir,
+                script_only=True)
+            script = script.replace('system.prmtop', str(outprmtop))
+            script = script.replace('system.inpcrd', str(outinpcrd))
+            return script
+        except RuntimeError as e:
+            print(f'Error in leap:\n{e}')
+            exit(1)
+
+    try:
+        prmtop, inpcrd, stdout = leap(
+            inpdbs, forcefields, het_names=het_names,
+            solvate=solvate, padding=padding, het_dir=het_dir)
+    except RuntimeError as e:
+        print(f'Error in leap:\n{e}')
+        exit(1)
+    if ion_molarity:
+        ttmp = mdt.load(inpcrd, top=prmtop)
+        n_waters = len(ttmp.topology.select('name O and resname HOH'))
+        n_na = len(ttmp.topology.select('name "Na+"'))
+        n_cl = len(ttmp.topology.select('name "Cl-"'))
+        n_ions = int(ion_molarity * n_waters/55.56)
+        if n_na > 0:
+            n_cl = n_ions - n_na
+            n_na = n_ions
+        else:
+            n_na = n_ions - n_cl
+            n_cl = n_ions
+        n_na = max(n_na, 0)
+        n_cl = max(n_cl, 0)
+
+        try:
+            script = leap(
+                inpdbs, forcefields, het_names=het_names,
+                solvate=solvate, padding=padding, het_dir=het_dir,
+                n_na=n_na, n_cl=n_cl, script_only=True)
+            script = script.replace('system.prmtop', str(outprmtop))
+            script = script.replace('system.inpcrd', str(outinpcrd))
+            return script
+        except RuntimeError as e:
+            print(f'Error in leap:\n{e}')
+            exit(1)
+
+
+def leap(amberpdbs, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
          n_na=0, n_cl=0, script_only=False):
     '''
     Parameterize a molecular system using tleap.
 
     Args:
-       amberpdb (str): An Amber-compliant PDB file
+       amberpdbs (list): List of Amber-compliant PDB files
        ff (list): The force fields to use.
        het_names (list): List of parameterised heterogens
        solvate (str or None): type of periodic box ('box', 'cube', or 'oct')
@@ -1254,7 +928,13 @@ def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
 
     '''
     _check_available('tleap')
-    inputs = ['script', 'system.pdb']
+    if len(amberpdbs) == 1:
+        inputs = ['script', 'system.pdb']
+    else:
+        inputs = ['script']
+        for i in range(len(amberpdbs)):
+            inputs.append(f'component{i}.pdb')
+
     outputs = ['system.prmtop', 'system.inpcrd', 'STDOUT']
     script = "".join([f'source leaprc.{f}\n' for f in ff])
 
@@ -1281,9 +961,27 @@ def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
                 inputs += [f'{r}.mol2', f'{r}.frcmod']
 
     if script_only:
-        script += f"system = loadpdb {amberpdb}\n"
+        if len(amberpdbs) == 1:
+            script += f"system = loadpdb {amberpdbs[0]}\n"
+        else:
+            for i, inpdb in enumerate(amberpdbs):
+                script += f'component{i} = loadpdb {inpdb}\n'
+            script += 'system = combine {'
+            for i in range(len(amberpdbs)):
+                script += f'component{i} '
+            script += '}\n'
+
     else:
-        script += "system = loadpdb system.pdb\n"
+        if len(amberpdbs) == 1:
+            script += "system = loadpdb system.pdb\n"
+        else:
+            for i, inpdb in enumerate(amberpdbs):
+                script += f'component{i} = loadpdb component{i}.pdb\n'
+            script += 'system = combine {'
+            for i in range(len(amberpdbs)):
+                script += f'component{i} '
+            script += '}\n'
+
     if solvate == "oct":
         script += f"solvateoct system {water_box} {padding}\n"
     elif solvate == "cube":
@@ -1303,7 +1001,7 @@ def leap(amberpdb, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
     fh = FileHandler()
     scriptfile = fh.create('scriptfile')
     scriptfile.write_text(script)
-    args = [scriptfile, amberpdb]
+    args = [scriptfile] + amberpdbs
     if het_names:
         if len(het_names) > 0:
             for r in het_names:
@@ -1358,250 +1056,3 @@ def indices_to_mask(indices):
     else:
         mask += f',{indices[-1]}'
     return mask
-
-
-def rest_min(pdbin, pdbref=None, kr=1.0, maxcyc=200):
-    '''
-    Perform restrained minimization on a structure.
-
-    Use openmm or sander to perform the minimization.
-
-    Args:
-        pdbin (str or FileHandle): input trajectory
-        pdbref (str or FileHandle, optional): reference coordinates
-        kr (float): force constant for the restraint (default: 1.0)
-        maxcyc (int): maximum number of cycles (default: 200)
-
-    Returns:
-        (FileHandle, str): minimized structure (PDB format), and log
-    '''
-    pdb4amber = SubprocessTask(
-        'pdb4amber -i in.pdb  -o out.pdb'
-        )
-    pdb4amber.set_inputs(['in.pdb'])
-    pdb4amber.set_outputs(['out.pdb'])
-    pdb_tmp = pdb4amber(pdbin)
-    try:
-        pdb_out, log = rest_min_omm(pdb_tmp, pdbref=pdbref, kr=kr,
-                                    maxcyc=maxcyc)
-    except ImportError:
-        pdb_out, log = rest_min_sander(pdbin, pdbref=pdbref,
-                                       kr=kr, maxcyc=maxcyc)
-
-    bumpinfo = bumps(pdb_out)
-    if bumpinfo != '':
-        print('Warning: close contacts detected in output structure',
-              file=sys.stderr)
-    return pdb_out, log
-
-
-def rest_min_omm(pdbin, pdbref=None, kr=1.0, maxcyc=200):
-    '''
-    Perform restrained minimization on a trajectory using OpenMM.
-
-    Args:
-        pdbin (str or FileHandle): input trajectory
-        pdbref (str or FileHandle, optional): reference coordinates
-        kr (float): force constant for the restraint (default: 1.0)
-        maxcyc (int): maximum number of cycles (default: 200)
-
-    Returns:
-        (FileHandle, str): minimized structure in PDB format, and log
-    '''
-    from openmm.app import AmberInpcrdFile, AmberPrmtopFile, Simulation
-    from openmm import LangevinMiddleIntegrator
-    from openmm.app import CutoffNonPeriodic
-    from openmm.unit import nanometer, kelvin, picosecond
-    from openmm import CustomExternalForce
-    from openmm.unit import kilocalories_per_mole, angstroms
-
-    if pdbref is None:
-        pdbref = pdbin
-    else:
-        pdbref, _ = match_align(pdbref, pdbin)
-    tin = _trajify(pdbin, standard_names=False)
-    tref = _trajify(pdbref, standard_names=False)
-
-    np = tin.topology.select('not protein')
-    standard_names = True
-    if len(np) > 0:
-        non_standard_residues = set([tin.topology.atom(i).residue.name
-                                     for i in np])
-        for r in non_standard_residues:
-            if r not in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'HOH']:
-                raise ValueError(
-                    'Error: input trajectory must contain only protein'
-                    ' and water atoms')
-            else:
-                if r in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH']:
-                    standard_names = False
-
-    prmtop, inpcrd, stdout = leap(pdbin, ['protein.ff14SB', 'water.tip3p'])
-
-    pdbamber = ambpdb(inpcrd, prmtop)
-    ta = mdt.load_pdb(pdbamber, standard_names=standard_names)
-    for i in range(ta.topology.n_residues):
-        ta_ri = ta.topology.residue(i)
-        tin_ri = tin.topology.residue(i)
-        ta_ri.resSeq = tin_ri.resSeq
-        ta_ri.chain.chain_id = tin_ri.chain.chain_id
-
-    in_ids = [atom_id(a) for a in tin.topology.atoms]
-    a_ids = [atom_id(a) for a in ta.topology.atoms]
-    ref_ids = [atom_id(a) for a in tref.topology.atoms]
-    extras = False
-    for i in ref_ids:
-        if i not in a_ids:
-            extras = True
-    if extras:
-        print('Warning: reference structure contains atoms'
-              ' not in input structure', file=sys.stderr)
-    ref_inds = [a_ids.index(a) for a in ref_ids if a in a_ids]
-
-    OPRMTOP = AmberPrmtopFile(prmtop)
-    OINPCRD = AmberInpcrdFile(inpcrd)
-
-    system = OPRMTOP.createSystem(
-        nonbondedMethod=CutoffNonPeriodic,
-        nonbondedCutoff=1*nanometer)
-
-    integrator = LangevinMiddleIntegrator(
-        300*kelvin,
-        1/picosecond,
-        0.004*picosecond)
-
-    force = CustomExternalForce("k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
-    force.addGlobalParameter("k", kr*kilocalories_per_mole/angstroms**2)
-    force.addPerParticleParameter("x0")
-    force.addPerParticleParameter("y0")
-    force.addPerParticleParameter("z0")
-    for i, j in enumerate(ref_inds):
-        force.addParticle(j, tref.xyz[0, i] * nanometer)
-
-    system.addForce(force)
-
-    simulation = Simulation(OPRMTOP.topology, system, integrator)
-    simulation.context.setPositions(OINPCRD.positions)
-    state = simulation.context.getState(getEnergy=True)
-    initial_energy = state.getPotentialEnergy().value_in_unit(
-        kilocalories_per_mole)
-    simulation.minimizeEnergy(maxIterations=maxcyc)
-    state = simulation.context.getState(getEnergy=True, getPositions=True)
-    positions = state.getPositions(asNumpy=True)
-    final_energy = state.getPotentialEnergy().value_in_unit(
-        kilocalories_per_mole)
-
-    # Create a new trajectory with minimized positions
-    # Remove any extra atoms added by leap in the process
-
-    indx = [a_ids.index(i) for i in in_ids]
-
-    tout = mdt.Trajectory(positions[indx], tin.topology)
-    log = 'Restrained minimization performed using OpenMM\n'
-    log += f'  force constant: {kr} kcal/mol/Å²\n'
-    log += f'  maximum cycles: {maxcyc}\n'
-    log += f'  initial energy: {initial_energy:.2f} kcal/mol\n'
-    log += f'  final energy: {final_energy:.2f} kcal/mol\n'
-    log += f'  number of restrained atoms: {len(ref_ids)}\n'
-
-    return _pdbify(tout), log
-
-
-def rest_min_sander(pdbin, pdbref=None, kr=1.0, maxcyc=200):
-    '''
-    Perform restrained minimization on a trajectory using Sander.
-
-    Args:
-        pdbin (path-like): input structure, PDB format
-        pdbref (path-like): reference structure, PDB format
-        kr (float): force constant for the restraint (default: 1.0)
-        maxcyc (int): maximum number of cycles (default: 200)
-
-    Returns:
-       FileHandle: minimized structure (PDB format)
-    '''
-
-    if pdbref is None:
-        pdbref = pdbin
-    else:
-        pdbref, _ = match_align(pdbref, pdbin)
-    tin = _trajify(pdbin, standard_names=False)
-    tref = _trajify(pdbref, standard_names=False)
-
-    np = tin.topology.select('not protein')
-    standard_names = True
-    if len(np) > 0:
-        non_standard_residues = set([tin.topology.atom(i).residue.name
-                                     for i in np])
-        for r in non_standard_residues:
-            if r not in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'HOH']:
-                raise ValueError(
-                    'Error: input trajectory must contain '
-                    'only protein and water atoms')
-            else:
-                if r in ['HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH']:
-                    standard_names = False
-
-    prmtop, inpcrd, stdout = leap(pdbin, ['protein.ff14SB', 'water.tip3p'])
-
-    pdbamber = ambpdb(inpcrd, prmtop)
-    ta = mdt.load_pdb(pdbamber, standard_names=standard_names)
-    for i in range(ta.topology.n_residues):
-        ta_ri = ta.topology.residue(i)
-        tin_ri = tin.topology.residue(i)
-        ta_ri.resSeq = tin_ri.resSeq
-        ta_ri.chain.chain_id = tin_ri.chain.chain_id
-
-    a_ids = [atom_id(a) for a in ta.topology.atoms]
-    ref_ids = [atom_id(a) for a in tref.topology.atoms]
-    extras = False
-    for i in ref_ids:
-        if i not in a_ids:
-            extras = True
-    if extras:
-        print('Warning: reference structure contains atoms'
-              ' not in input structure', file=sys.stderr)
-    ref_inds = [a_ids.index(a) for a in ref_ids if a in a_ids]
-
-    t_ref_full = mdt.Trajectory(tin.xyz, tin.topology)
-    for i, j in enumerate(ref_inds):
-        t_ref_full.xyz[0, j] = tref.xyz[0, i]
-
-    _check_available('sander')
-
-    _, refc, stdout = leap(t_ref_full, ['protein.ff14SB', 'water.tip3p'])
-    rmin = SubprocessTask('sander -O -i min.in -o min.out -p prmtop'
-                          ' -c in.rst7 -r out.ncrst -ref ref.rst7')
-    rmin.set_inputs(['min.in', 'prmtop', 'in.rst7', 'ref.rst7'])
-    rmin.set_outputs(['min.out', 'out.ncrst'])
-    # Create the input file for sander
-    min_in = f"""Minimization
- &cntrl
-    imin=1, maxcyc={maxcyc}, ncyc=20,
-    ntpr=5,
-    ntr=1,
-    igb=6,
-    restraint_wt={kr},
-    restraintmask='{indices_to_mask(ref_inds)}',
- &end
- """
-    fh = FileHandler()
-    minin = fh.create('min.in')
-    minin.write_text(min_in)
-
-    # Perform the minimization
-    log, restart = rmin(minin, prmtop, inpcrd, refc)
-
-    # Check for errors in the log
-    if 'NSTEP' not in log.read_text():
-        raise RuntimeError(f'Error: minimization failed.\n{log}')
-    pdb = ambpdb(inpcrd, prmtop)
-    tmptop = mdt.load_pdb(pdb, standard_names=False).topology
-    tin_ids = [(a.residue.name, a.residue.index, a.name)
-               for a in tin.topology.atoms]
-    out_ids = [(a.residue.name, a.residue.index, a.name)
-               for a in tmptop.atoms]
-    indx = [out_ids.index(i) for i in tin_ids]
-    tout = mdt.load(restart, top=tmptop)
-
-    return _pdbify(tout.atom_slice(indx)), log.read_text()

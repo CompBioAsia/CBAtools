@@ -1,9 +1,23 @@
 from argparse import ArgumentParser
 import mdtraj as mdt
 from cba_tools._version import __version__
-from cba_tools.cba_tools import make_leap
-from cba_tools.cba_tools import sp_search, parameterize, alpha_check
-from cba_tools.cba_tools import complete, rest_min, alpha_fix, alpha_get
+from cba_tools.cba_tools import make_leap, parameterize, complete, smiles_to_pdb
+
+
+def smiles_to_pdb_cli():
+    parser = ArgumentParser(description="Convert a SMILES string to a PDB file")
+    parser.add_argument('--smiles', help='Input SMILES string', required=True)
+    parser.add_argument('--outpdb', help='Output PDB file', required=True)
+    parser.add_argument('--pH', type=float, default=7.4,
+                        help='Target pH for protonation state')
+    parser.add_argument('--version', action='version', version=__version__)
+
+    parsed_args = parser.parse_args()
+    pdb_out, charge = smiles_to_pdb(parsed_args.smiles,
+                                    pH=parsed_args.pH)
+    with open(parsed_args.outpdb, 'w') as f:
+        f.write(pdb_out)
+    print(f"Formal charge on molecule: {charge}")
 
 
 def het_param_cli():
@@ -32,7 +46,7 @@ def het_param_cli():
 
 def make_leap_cli():
     parser = ArgumentParser(description="Generate tleap input script from PDB")
-    parser.add_argument('--inpdb', help='Input PDB file', required=True)
+    parser.add_argument('--inpdbs', nargs='*', help='Input PDB file(s)', required=True)
     parser.add_argument('--outinpcrd', help='Output AMBER .inpcrd file',
                         required=True)
     parser.add_argument('--outprmtop', help='Output AMBER .prmtop file',
@@ -70,141 +84,6 @@ def prepare_protein_cli():
     parsed_args = parser.parse_args()
     pdb_out = complete(parsed_args.inpdb)
     pdb_out.save(parsed_args.outpdb)
-
-
-def rest_min_cli():
-    parser = ArgumentParser(
-        description="Perform restrained minimization on a protein PDB file."
-    )
-    parser.add_argument('-i', '--inpdb', help='Input PDB file', required=True)
-    parser.add_argument('-o', '--outpdb', help='Output PDB file',
-                        required=True)
-    parser.add_argument('-r', '--refpdb', help='Reference PDB file')
-    parser.add_argument('-l', '--logfile',
-                        help='Log file for minimization output')
-
-    parser.add_argument('--maxcyc', type=int, default=200,
-                        help='Maximum number of minimization cycles')
-    parser.add_argument('--kr', type=float, default=1.0,
-                        help='Restraint force constant')
-    parser.add_argument('--version', action='version', version=__version__)
-
-    parsed_args = parser.parse_args()
-
-    try:
-        pdb_out, log = rest_min(parsed_args.inpdb,
-                                pdbref=parsed_args.refpdb,
-                                maxcyc=parsed_args.maxcyc,
-                                kr=parsed_args.kr)
-    except Exception as e:
-        print("Error during minimization:", e)
-        return
-    pdb_out.save(parsed_args.outpdb)
-    if parsed_args.logfile:
-        with open(parsed_args.logfile, 'w') as log_file:
-            log_file.write(log)
-
-
-def alpha_check_cli():
-    parser = ArgumentParser(
-        description="Check how well a PDB file matches its UniProt sequences.")
-    parser.add_argument("-i", "--inpdb",
-                        help="Input PDB file.", required=True)
-    parser.add_argument("-u", "--uniprot_ids", nargs='*', required=False,
-                        help="List of UniProt IDs for the input structure.")
-    parser.add_argument("-l", "--log", help="Log file for output.")
-    parser.add_argument("--version", action="version", version=__version__)
-
-    args = parser.parse_args()
-    if not args.inpdb:
-        parser.print_help()
-        return
-    log = alpha_check(args.inpdb, args.uniprot_ids)
-    if args.log:
-        with open(args.log, 'w') as log_file:
-            log_file.write(log)
-    else:
-        print(log)
-
-
-def alpha_get_cli():
-    parser = ArgumentParser(
-        description="Get Alphafold model for a UniProt IDs.")
-    parser.add_argument("-u", "--uniprot_id", required=True,
-                        help="UniProt ID to fetch.")
-    parser.add_argument("-p", "--pdb", required=True,
-                        help="PDB file to save the model.")
-    parser.add_argument("--version", action="version", version=__version__)
-
-    args = parser.parse_args()
-    if not args.uniprot_id or not args.pdb:
-        parser.print_help()
-        return
-    pdb = alpha_get(args.uniprot_id)
-    pdb.save(args.pdb)
-
-
-def alpha_fix_cli():
-    parser = ArgumentParser(
-        description="Fix missing residues in a PDB file using Alphafold.")
-    parser.add_argument("-i", "--inpdb",
-                        help="Input PDB file.", required=True)
-    parser.add_argument("-o", "--outpdb",
-                        help="Fixed PDB file.", required=True)
-    parser.add_argument("-c", "--chains", nargs='*', required=False,
-                        help="List of chain IDs to include in the output.")
-    parser.add_argument("-u", "--uniprot_ids", nargs='*', required=False,
-                        help="List of UniProt IDs for the input structure.")
-    parser.add_argument("-l", "--log", help="Log file for Alphafold output.")
-    parser.add_argument("-n", "--no_trim", action="store_true",
-                        help="Don't trim the fixed PDB file"
-                        " to match the input.")
-    parser.add_argument("--version", action="version", version=__version__)
-
-    args = parser.parse_args()
-    if not args.inpdb or not args.outpdb:
-        parser.print_help()
-        return
-    out_pdb, log = alpha_fix(args.inpdb, args.uniprot_ids,
-                             chains=args.chains, trim=not args.no_trim)
-    out_pdb.save(args.outpdb)
-    if args.log:
-        with open(args.log, 'w') as log_file:
-            log_file.write(log)
-    else:
-        print(log)
-
-
-def sp_search_cli():
-    parser = ArgumentParser(
-        description="Search SwissProt for Uniprot codes"
-                    " matching each chain in a protein structure."
-    )
-    parser.add_argument("-i", "--inpdb",
-                        help="Input protein structure file.", required=True)
-    parser.add_argument("-m", "--max_hits", type=int, default=1,
-                        help="Maximum number of hits to return per chain.")
-    parser.add_argument("--version", action="version", version=__version__)
-
-    args = parser.parse_args()
-    t = mdt.load(args.inpdb)
-    seqs = t.topology.to_fasta()
-    indent = ''
-    for i, seq in enumerate(seqs):
-        if len(seqs) > 1:
-            print(f'Matches for chain {i} ({t.topology.chain(i).chain_id}):')
-            indent = '  '
-        if len(seq) == 0:
-            print(f"{indent}Skipping non-protein chain.")
-            continue
-        if len(seq) < 10:
-            print(f"{indent}Skipping short ({len(seq)} residue chain.")
-            continue
-        result = sp_search(seq)
-        for match in result[:args.max_hits]:
-            uid = match['uniprotAccession']
-            pid = float(match['percent_identity'])
-            print(f"{indent}{uid} {pid:3.1f} %")
 
 
 def mesmy_cli():
