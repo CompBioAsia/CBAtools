@@ -15,6 +15,8 @@ def smiles_to_pdb_cli():
     parsed_args = parser.parse_args()
     pdb_out, charge = smiles_to_pdb(parsed_args.smiles,
                                     pH=parsed_args.pH)
+    rid = parsed_args.outpdb[:3].upper()
+    pdb_out = pdb_out.replace("UNL", rid)
     with open(parsed_args.outpdb, 'w') as f:
         f.write(pdb_out)
     print(f"Formal charge on molecule: {charge}")

@@ -734,9 +734,9 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
     traj_het = traj_hets.atom_slice(traj_hets.topology.select('resid 0'))
     # Remove bonds as they cause problems
     traj_het.topology._bonds = []
-    het_pdb = Path(het_dir) / f'{residue_name}.pdb'
-    _check_overwrite(het_pdb, overwrite)
-    traj_het.save(het_pdb)
+    # het_pdb = Path(het_dir) / f'{residue_name}.pdb'
+    # _check_overwrite(het_pdb, overwrite)
+    # traj_het.save(het_pdb)
 
     # Run antechamber
     _check_available('antechamber')
