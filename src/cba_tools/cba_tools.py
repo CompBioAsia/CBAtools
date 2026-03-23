@@ -59,7 +59,7 @@ import mdtraj as mdt
 import numpy as np
 
 from rdkit import Chem
-from rdkit.Chem import rdDistGeom
+from rdkit.Chem import AllChem
 from openbabel import openbabel as ob
 
 from crossflow.tasks import SubprocessTask, CalledProcessError
@@ -657,13 +657,14 @@ def pdb_diff(p_before, p_after):
 
 #  Part 4: Tools for ligand parameterization with AmberTools
 
-def smiles_to_pdb(smi, pH=7.0):
+def smiles_to_pdb(smi, pH=7.0, n_confs=10):
     '''
     Convert an input SMILES representation to a PDB file
 
     Args:
         smi (str): Input SMILES string
         pH (float): target pH
+        n_confs (int): number of conformers to generate
 
     Returns:
         pdb_out (str): The PDB file as a string
@@ -680,9 +681,10 @@ def smiles_to_pdb(smi, pH=7.0):
     charge = smi_pH.count('+]') - smi_pH.count('-]')
     mol_pH = Chem.MolFromSmiles(smi_pH)
     mol_pH_H = Chem.AddHs(mol_pH)
-    rdDistGeom.EmbedMolecule(mol_pH_H)
-    pdb_out = Chem.MolToPDBBlock(mol_pH_H)
-
+    cids = AllChem.EmbedMultipleConfs(mol_pH_H, numConfs=n_confs)
+    res = AllChem.MMFFOptimizeMoleculeConfs(mol_pH_H, numThreads=0)
+    imin = min(range(len(res)), key=lambda i: res[i][1])
+    pdb_out = Chem.MolToPDBBlock(mol_pH_H, confId=cids[imin])
     return pdb_out, charge
 
 
