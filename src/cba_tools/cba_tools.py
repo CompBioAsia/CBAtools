@@ -7,13 +7,13 @@
 # These include:
 #
 # a) Packages that must be installed/available:
-#   Blast
 #   AmberTools
 #
 # b) Python packages that will be automatically installed:
 #   MDTraj
-#   OpenMM
-#   alphafix
+#   RDKit
+#   OpenBabel
+#   crossflow
 #
 # The functions are:
 #
@@ -34,7 +34,7 @@
 #                  using AmberTools.
 #                  Requires antechamber and parmchk2 to be available.
 #
-#   param:         A complete AMBER-focussed workflow to prepare input
+#   make_leap:     Generates a tleap input script to prepare input
 #                  files (coordinates and topology/forcefield
 #                  parameters) for MD simulation, from complete PDB
 #                  format files of the solute components (e.g. all-atom
@@ -65,7 +65,6 @@ from openbabel import openbabel as ob
 from crossflow.tasks import SubprocessTask, CalledProcessError
 from crossflow.filehandling import FileHandler, FileHandle
 from functools import cache
-from enum import IntEnum
 import shutil
 
 from pathlib import Path
