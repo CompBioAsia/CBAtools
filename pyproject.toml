@@ -33,9 +33,9 @@ authors = [
     ]
 dependencies = [
     "numpy",
-    "matplotlib",
     "mdtraj",
     "rdkit",
+    "openbabel-wheel",
     "crossflow"
 ]
 [project.scripts]

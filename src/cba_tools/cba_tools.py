@@ -259,267 +259,9 @@ def atom_id(a):
 
     return f"{residue_id(a.residue)}@{a.name}"
 
-
-# For the Smith-Waterman code:
-class Score(IntEnum):
-    MATCH = 1
-    MISMATCH = -1
-    GAP = -1
-
-
-# Assigning the constant values for the traceback
-class Trace(IntEnum):
-    STOP = 0
-    LEFT = 1
-    UP = 2
-    DIAGONAL = 3
-
-
-def smith_waterman(seq1, seq2):
-    '''A simple Smith-Waterman local alignment routine.
-
-    Adapted from:
-    https://github.com/slavianap/Smith-Waterman-Algorithm/blob/master/Script.py
-
-    Args:
-       seq1 (str): The first sequence
-       seq2 (str): The second sequence
-
-    Returns:
-        tuple: The aligned sequences
-    '''
-    # Generating the empty matrices for storing scores and tracing
-    row = len(seq1) + 1
-    col = len(seq2) + 1
-    matrix = np.zeros(shape=(row, col), dtype=int)
-    tracing_matrix = np.zeros(shape=(row, col), dtype=int)
-
-    # Initialising the variables to find the highest scoring cell
-    max_score = -1
-    max_index = (-1, -1)
-
-    # Calculating the scores for all cells in the matrix
-    for i in range(1, row):
-        for j in range(1, col):
-            # Calculating the diagonal score (match score)
-            match_value = Score.MATCH if seq1[i - 1] == seq2[j - 1] \
-                            else Score.MISMATCH
-            diagonal_score = matrix[i - 1, j - 1] + match_value
-
-            # Calculating the vertical gap score
-            vertical_score = matrix[i - 1, j] + Score.GAP
-
-            # Calculating the horizontal gap score
-            horizontal_score = matrix[i, j - 1] + Score.GAP
-
-            # Taking the highest score
-            matrix[i, j] = max(0, diagonal_score, vertical_score,
-                               horizontal_score)
-
-            # Tracking where the cell's value is coming from
-            if matrix[i, j] == 0:
-                tracing_matrix[i, j] = Trace.STOP
-
-            elif matrix[i, j] == horizontal_score:
-                tracing_matrix[i, j] = Trace.LEFT
-
-            elif matrix[i, j] == vertical_score:
-                tracing_matrix[i, j] = Trace.UP
-
-            elif matrix[i, j] == diagonal_score:
-                tracing_matrix[i, j] = Trace.DIAGONAL
-
-            # Tracking the cell with the maximum score
-            if matrix[i, j] >= max_score:
-                max_index = (i, j)
-                max_score = matrix[i, j]
-
-    # Initialising the variables for tracing
-    aligned_seq1 = ""
-    aligned_seq2 = ""
-    current_aligned_seq1 = ""
-    current_aligned_seq2 = ""
-    (max_i, max_j) = max_index
-
-    # Tracing and computing the pathway with the local alignment
-    while tracing_matrix[max_i, max_j] != Trace.STOP:
-        if tracing_matrix[max_i, max_j] == Trace.DIAGONAL:
-            current_aligned_seq1 = seq1[max_i - 1]
-            current_aligned_seq2 = seq2[max_j - 1]
-            max_i = max_i - 1
-            max_j = max_j - 1
-
-        elif tracing_matrix[max_i, max_j] == Trace.UP:
-            current_aligned_seq1 = seq1[max_i - 1]
-            current_aligned_seq2 = '-'
-            max_i = max_i - 1
-
-        elif tracing_matrix[max_i, max_j] == Trace.LEFT:
-            current_aligned_seq1 = '-'
-            current_aligned_seq2 = seq2[max_j - 1]
-            max_j = max_j - 1
-
-        aligned_seq1 = aligned_seq1 + current_aligned_seq1
-        aligned_seq2 = aligned_seq2 + current_aligned_seq2
-
-    # Reversing the order of the sequences
-    aligned_seq1 = aligned_seq1[::-1]
-    aligned_seq2 = aligned_seq2[::-1]
-
-    #  Add unmatched ends, if any:
-    if max_i > 0 and max_j > 0:
-        n_extra = min(max_i, max_j)
-        aligned_seq1 = seq1[max_i-n_extra:max_i] + aligned_seq1
-        aligned_seq2 = seq2[max_j-n_extra:max_j] + aligned_seq2
-        max_i = max_i - n_extra
-        max_j = max_j - n_extra
-
-    if max_i > 0:
-        aligned_seq1 = seq1[:max_i] + aligned_seq1
-        aligned_seq2 = '-' * max_i + aligned_seq2
-    elif max_j > 0:
-        aligned_seq2 = seq2[:max_j] + aligned_seq2
-        aligned_seq1 = '-' * max_j + aligned_seq1
-
-    if max_index[0] < row - 1:
-        aligned_seq1 += seq1[max_index[0]:]
-        aligned_seq2 += '-' * (row - 1 - max_index[0])
-    elif max_index[1] < col - 1:
-        aligned_seq2 += seq2[max_index[1]:]
-        aligned_seq1 += '-' * (col - 1 - max_index[1])
-    return aligned_seq1, aligned_seq2
-
-
-def aln_score(alignment):
-    '''
-    Calculate the number of matches, mismatches and gaps
-        in a pairwise alignment.
-
-    Args:
-        alignment (tuple): A tuple containing two aligned sequences.
-
-    Returns:
-        tuple: A tuple containing the number of matches, mismatches, and gaps.
-
-    '''
-    if not len(alignment[0]) == len(alignment[1]):
-        raise ValueError('Error: alignments must be the same length')
-    matches = 0
-    mismatches = 0
-    gaps = 0
-    for a, b in zip(*alignment):
-        if '-' in a+b and '--' not in a+b:
-            gaps += 1
-        else:
-            if a == b:
-                matches += 1
-            else:
-                mismatches += 1
-    return matches, mismatches, gaps
-
+#
 #  Part 2: Sequence-based manipulation of "pure" protein structures
 #          represented as single-snapshot MDTrajectory files
-
-
-def match_align(pdb_in, pdb_ref, cutoff=0.02, renumber=False, align=True):
-    '''
-    Superimpose pdb_in onto pdb_ref, based on sequence alignment
-
-    The C-alpha atoms used for least-squares fitting are iteratively pruned
-    until all pairs are within <cutoff> nanometers.
-
-    Args:
-        pdb_in: The input PDB file or MDTraj trajectory for the structure
-                to align.
-        pdb_ref: The reference PDB file or MDTraj trajectory for the structure
-                to align to.
-        cutoff: The distance cutoff for defining close contacts
-                (default: 0.02 nm).
-        renumber: If True, the returned PDB file has its residue sequence
-                  numbers changed to match those in the reference PDB.
-        align: If False, no structure superposition is performed (only useful
-               if renumber=True!).
-
-   Returns:
-        Filehandle: The path to the aligned PDB file.
-
-    '''
-    t_in = _trajify(pdb_in)
-    t_ref = _trajify(pdb_ref)
-
-    seq_in = t_in.topology.to_fasta()
-    seq_ref = t_ref.topology.to_fasta()
-    if len(seq_in) != len(seq_ref):
-        raise ValueError(
-            'Error: input and reference sequences must have'
-            ' the same number of chains')
-
-    n_chains = len(seq_in)
-    alignment = ["", ""]
-    for i in range(n_chains):
-        aln = smith_waterman(seq_in[i], seq_ref[i])
-        alignment[0] += aln[0]
-        alignment[1] += aln[1]
-
-    i = -1
-    j = -1
-    pairs = []
-    ca_in = t_in.topology.select('name CA')
-    ca_ref = t_ref.topology.select('name CA')
-    pair_pos = {}
-    k = 0
-    for a, b in zip(*alignment):
-        if a != '-':
-            i += 1
-        if b != '-':
-            j += 1
-        if '-' not in a+b:
-            pair = (ca_in[i], ca_ref[j])
-            pairs.append(pair)
-            pair_pos[pair] = k
-        k += 1
-
-    t_copy = mdt.Trajectory(t_in.xyz.copy(), t_in.topology.copy())
-    tt_copy = t_copy.topology
-    tt_ref = t_ref.topology
-    if renumber:
-        for pair in pair_pos:
-            seq = tt_ref.atom(pair[1]).residue.resSeq
-            tt_copy.atom(pair[0]).residue.resSeq = seq
-
-    if not align:
-        return _pdbify(t_copy), alignment
-
-    unconverged = True
-    # Iteratively remove pairs that are too far apart
-    while unconverged:
-        atom_indices = [p[0] for p in pairs]
-        ref_atom_indices = [p[1] for p in pairs]
-        t_out = t_copy.superpose(t_ref, atom_indices=atom_indices,
-                                 ref_atom_indices=ref_atom_indices)
-        dx = t_out.xyz[0, atom_indices] - t_ref.xyz[0, ref_atom_indices]
-        err = np.linalg.norm(dx, axis=1)
-        if err.max() > cutoff:
-            ierr = np.argsort(err)
-            icut = np.argmax(err[ierr] > cutoff)
-            lerr = len(err)
-            r1 = (lerr-icut) // 2
-            r2 = lerr // 10
-            r = min(r1, r2)
-            r = max(r, 1)
-            discards = ierr[-r:]
-            old_pairs = pairs
-            pairs = []
-            for i, p in enumerate(old_pairs):
-                if i not in discards:
-                    pairs.append(p)
-        else:
-            unconverged = False
-    pairings = [' '] * len(alignment[0])
-    for p in pairs:
-        pairings[pair_pos[p]] = '|'
-    alignment = (alignment[0],  ''.join(pairings), alignment[1])
-    return _pdbify(t_out), alignment
 
 
 def clean_pdb(pdbfile):
@@ -718,7 +460,7 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
 
     available = True
     for ext in ['.pdb', '.mol2', '.frcmod']:
-        file = Path(het_dir) / f'{residue_name}{ext}'
+        file = Path(het_dir) / f'{residue_name}_{gaff}{ext}'
         if not file.exists():
             available = False
     if available:
@@ -736,9 +478,6 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
     traj_het = traj_hets.atom_slice(traj_hets.topology.select('resid 0'))
     # Remove bonds as they cause problems
     traj_het.topology._bonds = []
-    # het_pdb = Path(het_dir) / f'{residue_name}.pdb'
-    # _check_overwrite(het_pdb, overwrite)
-    # traj_het.save(het_pdb)
 
     # Run antechamber
     _check_available('antechamber')
@@ -774,13 +513,13 @@ def parameterize(source, residue_name, charge=0, gaff='gaff',
     parmchk.set_outputs(['outfile.frcmod'])
     frcmod = parmchk(outmol2)
 
-    mol2file = Path(het_dir) / f'{residue_name}.mol2'
+    mol2file = Path(het_dir) / f'{residue_name}_{gaff}.mol2'
     _check_overwrite(mol2file, overwrite)
-    outmol2.save(f'{residue_name}.mol2')
+    outmol2.save(f'{residue_name}_{gaff}.mol2')
 
-    frcmodfile = Path(het_dir) / f'{residue_name}.frcmod'
+    frcmodfile = Path(het_dir) / f'{residue_name}_{gaff}.frcmod'
     _check_overwrite(frcmodfile, overwrite)
-    frcmod.save(f'{residue_name}.frcmod')
+    frcmod.save(f'{residue_name}_{gaff}.frcmod')
 
 
 #  Part 5: Tools for (Amber) MD simulation preparation
@@ -955,12 +694,16 @@ def leap(amberpdbs, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
                 water_box = 'SPCEBOX'
     if het_names:
         if len(het_names) > 0:
+            if 'gaff2' in ff:
+                gaff = 'gaff2'
+            else:
+                gaff = 'gaff'
             for r in het_names:
-                _check_exists(Path(het_dir) / f'{r}.frcmod')
-                _check_exists(Path(het_dir) / f'{r}.mol2')
-                script += f'loadamberparams {r}.frcmod\n'
-                script += f'{r} = loadmol2 {r}.mol2\n'
-                inputs += [f'{r}.mol2', f'{r}.frcmod']
+                _check_exists(Path(het_dir) / f'{r}_{gaff}.frcmod')
+                _check_exists(Path(het_dir) / f'{r}_{gaff}.mol2')
+                script += f'loadamberparams {r}_{gaff}.frcmod\n'
+                script += f'{r} = loadmol2 {r}_{gaff}.mol2\n'
+                inputs += [f'{r}_{gaff}.mol2', f'{r}_{gaff}.frcmod']
 
     if script_only:
         if len(amberpdbs) == 1:
@@ -1013,48 +756,3 @@ def leap(amberpdbs, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
     if prmtop is None or inpcrd is None:
         raise RuntimeError(f'Error in leap: {stdout}')
     return prmtop, inpcrd, stdout
-
-
-def ambpdb(inpcrd, prmtop):
-    '''
-    Convert an Amber inpcrd file to a PDB file.
-
-    Args:
-        inpcrd (str): input inpcrd file name
-        prmtop (str): input prmtop file name
-    '''
-    _check_available('ambpdb')
-
-    _ambpdb = SubprocessTask('ambpdb -p x.prmtop -c x.inpcrd > x.pdb')
-    _ambpdb.set_inputs(['x.inpcrd', 'x.prmtop'])
-    _ambpdb.set_outputs(['x.pdb'])
-    outpdb = _ambpdb(inpcrd, prmtop)
-
-    return outpdb
-
-
-def indices_to_mask(indices):
-    '''
-    Convert a list of atom indices into an Amber-style atom mask
-    '''
-    mask = f'@{indices[0]}'
-    if len(indices) == 1:
-        return mask
-
-    c = ' '
-    for i in range(1, len(indices)):
-        if indices[i] - indices[i-1] == 1:
-            c += 'x'
-        else:
-            c += ' '
-
-    for i in range(1, len(c)-1):
-        if c[i] == ' ':
-            if c[i-1] == 'x':
-                mask += f'-{indices[i-1]}'
-            mask += f',{indices[i]}'
-    if c[-1] == 'x':
-        mask += f'-{indices[-1]}'
-    else:
-        mask += f',{indices[-1]}'
-    return mask
