@@ -1,7 +1,7 @@
 # CBA-Tools
 A package providing useful tools for Amber-focussed MD simulation setup.
 
-Prepared fpr CompBioAsia 2025.
+Prepared for CompBioAsia 2025.
 
 ## Author
 
