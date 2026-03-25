@@ -12,9 +12,8 @@ Convert a SMILES string to a PDB file using OpenBabel
                 attempts to generate structures in a protonation state
                 appropriate for a chosen pH (default 7.4), but this is not
                 guaranteed to be correct.
-
-                ```
-                usage: smiles_to_pdb [-h] --smiles SMILES --outpdb OUTPDB [--pH PH]
+```
+usage: smiles_to_pdb [-h] --smiles SMILES --outpdb OUTPDB [--pH PH]
                      [--version]
 
 Convert a SMILES string to a PDB file
@@ -25,6 +24,7 @@ options:
   --outpdb OUTPDB  Output PDB file
   --pH PH          Target pH for protonation state
   --version        show program's version number and exit
+
 ```
 
 #### prepare_protein
@@ -73,6 +73,7 @@ options:
   --no_opt              Skip optimization at QM stage
   --overwrite           Overwrite existing files
   --version             show program's version number and exit
+
   ```
 
 #### make_leap
