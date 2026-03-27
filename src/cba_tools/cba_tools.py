@@ -749,8 +749,8 @@ def leap(amberpdbs, ff, het_names=None, solvate=None, padding=10.0, het_dir='.',
     if het_names:
         if len(het_names) > 0:
             for r in het_names:
-                args += [f'{Path(het_dir)}/{r}.mol2',
-                         f'{Path(het_dir)}/{r}.frcmod']
+                args += [f'{Path(het_dir)}/{r}_{gaff}.mol2',
+                         f'{Path(het_dir)}/{r}_{gaff}.frcmod']
     prmtop, inpcrd, stdout = tleap(*args)
     if prmtop is None or inpcrd is None:
         raise RuntimeError(f'Error in leap: {stdout}')
