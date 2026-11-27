@@ -1,91 +1,44 @@
 from argparse import ArgumentParser
-import mdtraj as mdt
 from cba_tools._version import __version__
-from cba_tools.cba_tools import make_leap, parameterize, complete, smiles_to_pdb
+from cba_tools.yaspt import run_yaspt
+import mdtraj as mdt
+import sys
 
 
-def smiles_to_pdb_cli():
-    parser = ArgumentParser(description="Convert a SMILES string to a PDB file")
-    parser.add_argument('--smiles', help='Input SMILES string', required=True)
-    parser.add_argument('--outpdb', help='Output PDB file', required=True)
-    parser.add_argument('--pH', type=float, default=7.4,
-                        help='Target pH for protonation state')
-    parser.add_argument('--version', action='version', version=__version__)
+def yaspt_cli():
+    """
+    Command line interface for YASPT
+    """
+    parser = ArgumentParser(description="YASPT - Yet Another Simulation Preparation Tool")
+    parser.add_argument("-y", "--yaml", dest="yaml_file", help="Input YAML file with system preparation parameters")
+    parser.add_argument("-v", "--version", action="version", version=f"YASPT {__version__}")
+    parser.add_argument("-t", "--template", help="Output a template YAML file", action="store_true")
 
-    parsed_args = parser.parse_args()
-    pdb_out, charge = smiles_to_pdb(parsed_args.smiles,
-                                    pH=parsed_args.pH)
-    rid = parsed_args.outpdb[:3].upper()
-    pdb_out = pdb_out.replace("UNL", rid)
-    with open(parsed_args.outpdb, 'w') as f:
-        f.write(pdb_out)
-    print(f"Formal charge on molecule: {charge}")
+    args = parser.parse_args()
+    if args.template:
+        template_yaml = """
+# Example YAML file for YASPT - Yet Another Simulation Preparation Tool
+# Where a parameter's default value suffices, it can be omitted from the input file.
+#
+system_name: my_system    # Name of the system, used for output files
+source: input.pdb         # Path to the input PDB file
+non_standard_residues:
+    LIG: CCO              # Residue name and SMILES for each non-standard residue
+protein_ff: ff14SB        # Force field for the protein (options: ff14SB, ff19SB)
+ligand_ff: gaff           # Force field for the ligand (options: gaff, gaff2)
+target_pH: 7.4            # Target pH for protonation state assignment
+water_model: TIP3P        # Water model for solvation (options: TIP3P, OPC, etc.)
+target_ion_molarity: 0.15 # Target ion concentration in mol/L (for neutralizing the system)
+salt: NaCl                # Salt type for neutralization (options: NaCl, KCl)
+pbc: cubic                # Periodic boundary condition type (options: cubic, box, truncated_octahedral)
+padding: 12.0             # Padding around the system in Angstroms
+"""
+    
+        print(template_yaml)
+        sys.exit(0)
 
-
-def het_param_cli():
-    parser = ArgumentParser(description="Parameterize a heterogen")
-    parser.add_argument('--inpdb', help='Input PDB file', required=True)
-    parser.add_argument('--het_name', help='Names of heterogen residues',
-                        required=True)
-    parser.add_argument('--het_charge', type=int, default=0,
-                        help='Formal charge of heterogen')
-    parser.add_argument('--forcefield', help='Force field to use',
-                        default='gaff', choices=['gaff', 'gaff2'])
-    parser.add_argument('--het_dir', help='Directory for heterogen files',
-                        default='.')
-    parser.add_argument('--no_opt', default=False, action='store_true',
-                        help='Skip optimization at QM stage')
-    parser.add_argument('--overwrite', default=False, action='store_true',
-                        help='Overwrite existing files')
-    parser.add_argument('--version', action='version', version=__version__)
-
-    parsed_args = parser.parse_args()
-    parameterize(parsed_args.inpdb, parsed_args.het_name,
-                 charge=parsed_args.het_charge,
-                 gaff=parsed_args.forcefield, het_dir=parsed_args.het_dir,
-                 overwrite=parsed_args.overwrite, no_opt=parsed_args.no_opt)
-
-
-def make_leap_cli():
-    parser = ArgumentParser(description="Generate tleap input script from PDB")
-    parser.add_argument('--inpdbs', nargs='*', help='Input PDB file(s)', required=True)
-    parser.add_argument('--outinpcrd', help='Output AMBER .inpcrd file',
-                        required=True)
-    parser.add_argument('--outprmtop', help='Output AMBER .prmtop file',
-                        required=True)
-    parser.add_argument('--forcefields', nargs='*', help='Force fields to use')
-    parser.add_argument('--het_names', nargs='*',
-                        help='Names of heterogen residues')
-    parser.add_argument('--solvate', help='Type of water box to use',
-                        choices=['box', 'cube', 'oct'])
-    parser.add_argument('--padding',
-                        help='minimum distance of solute atoms from box edge',
-                        type=float, default=10.0)
-    parser.add_argument('--het_dir', help='Directory for heterogen files',
-                        default='.')
-    parser.add_argument('--ion_molarity', type=float,
-                        help='Target ionic strength (M)')
-
-    parser.add_argument('--version', action='version', version=__version__)
-
-    parsed_args = parser.parse_args()
-
-    result = make_leap(**vars(parsed_args))
-    print(result)
-
-
-def prepare_protein_cli():
-
-    parser = ArgumentParser(
-        description="Prepare a PDB file for AMBER simulation."
-    )
-    parser.add_argument('-i', '--inpdb', help='Input PDB file', required=True)
-    parser.add_argument('-o', '--outpdb', help='Output PDB file',
-                        required=True)
-
-    parsed_args = parser.parse_args()
-    pdb_out = complete(parsed_args.inpdb)
-    pdb_out.save(parsed_args.outpdb)
+    if args.yaml_file:
+        run_yaspt(args.yaml_file)       
 
 
 def mesmy_cli():

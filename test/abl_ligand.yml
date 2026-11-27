@@ -1,0 +1,5 @@
+system_name: abl_ligand
+source: abl_ligand_model_0.pdb
+non_standard_residues:
+    LIG: c1ccc(NC(=O)c2ccc(C[NH+]3CCN(C)CC3)cc2)cc1Nc1nccc(-c2ccncc2)n1
+pbc: truncated_octahedral
