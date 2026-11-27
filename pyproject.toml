@@ -6,7 +6,7 @@ name = "cba_tools"
 dynamic = ['version']
 description = "Protein MD Simulation Setup Tools for CompBioAsia."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 license-files = ["LICENSE"]
 keywords = [
@@ -21,28 +21,23 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
 authors = [
-    {name = "Charlie Laughton", email = "charles.laughton@nottingham.ac.uk"}
+    {name = "Charlie Laughton", email = "charles.laughton@nottingham.ac.uk"},
+    {name = "Bindu Koli", email = ""}
     ]
 dependencies = [
     "numpy",
     "mdtraj",
     "rdkit",
-    "openbabel-wheel",
     "crossflow"
 ]
 [project.scripts]
-smiles_to_pdb = "cba_tools.cli_scripts:smiles_to_pdb_cli"
-prepare_protein = "cba_tools.cli_scripts:prepare_protein_cli"
-make_leap = "cba_tools.cli_scripts:make_leap_cli"
-het_param = "cba_tools.cli_scripts:het_param_cli"
+yaspt = "cba_tools.cli_scripts:yaspt_cli"
 mesmy = "cba_tools.cli_scripts:mesmy_cli"
 
 [tool.hatch.metadata.hooks.custom]
